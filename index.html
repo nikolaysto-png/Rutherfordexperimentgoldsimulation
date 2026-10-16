@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f1e8" />
+    <meta name="description" content="Explore Rutherford scattering in an interactive alpha-particle simulation." />
+    <title>Rutherford scattering | Physics lab</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <script>
+      (() => {
+        let theme;
+        try { theme = localStorage.getItem("theme"); } catch (_) {}
+        if (theme !== "light" && theme !== "dark") {
+          theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="#top" aria-label="Physics lab, home">
+          <span class="brand-mark" aria-hidden="true">π</span>
+          <span>PHYSICS <span class="brand-light">LAB</span></span>
+        </a>
+        <div class="topbar-right">
+          <span class="lesson-tag"><span class="status-dot"></span> INTERACTIVE LESSON</span>
+          <button id="theme" class="icon-button" type="button" aria-label="Switch color theme" title="Switch color theme">
+            <span id="themeLabel">Dark mode</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"></path></svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="top">
+        <section class="intro" aria-labelledby="page-title">
+          <div class="intro-copy">
+            <p class="eyebrow"><span>ATOMIC PHYSICS</span><span class="eyebrow-rule"></span><span>GEIGER–MARSDEN · 1909</span></p>
+            <h1 id="page-title">A tiny nucleus.<br /><em>A surprising turn.</em></h1>
+            <p class="intro-text">Fire alpha particles at a gold nucleus and watch Rutherford’s scattering experiment unfold, one trajectory at a time.</p>
+          </div>
+          <aside class="formula-card" aria-label="Rutherford scattering relationship">
+            <p class="formula-label">RUTHERFORD SCATTERING</p>
+            <p class="formula">tan <span>(</span><span class="frac"><span>θ</span><span>2</span></span><span>)</span> = <span class="frac"><span>d</span><span>2b</span></span></p>
+            <p class="formula-note"><i>θ</i> deflection angle <span>·</span> <i>b</i> impact parameter</p>
+          </aside>
+        </section>
+
+        <section class="controls-panel" aria-label="Simulation controls">
+          <div class="control-group energy-control">
+            <div class="control-heading"><label for="speed">Alpha energy</label><output id="speedValue" for="speed">5.0 MeV</output></div>
+            <input id="speed" type="range" min="0.8" max="20" step="0.1" value="5" aria-label="Alpha particle energy" />
+            <div class="range-labels"><span>0.8 MeV</span><span>20 MeV</span></div>
+          </div>
+          <div class="control-group rate-control">
+            <div class="control-heading"><label for="rate">Beam intensity</label><output id="rateValue" for="rate">14 α/s</output></div>
+            <input id="rate" type="range" min="2" max="40" step="1" value="14" aria-label="Alpha particles per second" />
+            <div class="range-labels"><span>Slow</span><span>Fast</span></div>
+          </div>
+          <label class="theory-toggle"><input id="showTheory" type="checkbox" checked /><span class="toggle-ui" aria-hidden="true"></span><span>Show predicted paths</span></label>
+          <div class="control-actions">
+            <button id="pause" class="button button-primary" type="button"><span class="pause-glyph" aria-hidden="true">Ⅱ</span><span>Pause</span></button>
+            <button id="reset" class="button button-quiet" type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3.5 5.5v-3m0 0h3m-3 0 2.3 2.3a6.2 6.2 0 1 1-1.5 6.1"></path></svg>Reset counts</button>
+          </div>
+        </section>
+
+        <section class="lab-grid" aria-label="Live Rutherford scattering simulation">
+          <figure class="simulation-panel">
+            <div class="simulation-heading">
+              <div><span class="section-index">01</span><h2>Particle chamber</h2></div>
+              <span class="live-badge"><span class="pulse-dot"></span><span id="runState">LIVE</span></span>
+            </div>
+            <div class="stagebox">
+              <canvas id="stage" role="img" aria-label="Live view of alpha particles scattering around a gold nucleus"></canvas>
+              <div class="stage-caption stage-caption-left"><span class="caption-line"></span> α SOURCE</div>
+              <div class="stage-caption stage-caption-right">ZnS DETECTOR <span class="caption-line"></span></div>
+              <div class="scale-note">DISTANCES TO SCALE</div>
+            </div>
+            <figcaption class="stage-legend">
+              <span><i class="legend-dot legend-alpha"></i>Alpha particle (+2e)</span>
+              <span><i class="legend-line"></i>Predicted trajectory</span>
+              <span><i class="legend-dot legend-gold"></i>Gold nucleus (+79e)</span>
+            </figcaption>
+          </figure>
+
+          <aside class="data-column" aria-label="Simulation measurements">
+            <section class="data-card beam-card">
+              <div class="card-heading"><span class="section-index">02</span><h2>Incoming beam</h2></div>
+              <dl class="readout-list">
+                <dt>Kinetic energy</dt><dd id="kE">5.00 MeV</dd>
+                <dt>Speed</dt><dd id="kV">—</dd>
+                <dt>Head-on approach</dt><dd id="kD">—</dd>
+                <dt>Gold nucleus radius</dt><dd>6.98 fm</dd>
+              </dl>
+              <div class="energy-check"><span>Energy conservation</span><strong id="kErr">Collecting data…</strong></div>
+            </section>
+
+            <section class="data-card counts-card" aria-live="polite" aria-atomic="true">
+              <div class="card-heading"><span class="section-index">03</span><h2>What got through?</h2></div>
+              <dl class="readout-list count-list">
+                <dt>Particles detected</dt><dd id="sTotal">0</dd>
+                <dt>Deflected &gt; 5°</dt><dd id="sDef">0 <small>—</small></dd>
+                <dt>Scattered &gt; 90°</dt><dd id="sBack">0 <small>—</small></dd>
+                <dt>Mean angle error</dt><dd id="sDev">—</dd>
+              </dl>
+            </section>
+
+            <section class="data-card chart-card">
+              <div class="card-heading"><span class="section-index">04</span><h2>Scattering angles</h2></div>
+              <p class="card-description">Observed counts vs. Rutherford prediction</p>
+              <canvas id="hist" role="img" aria-label="Live histogram comparing simulated scattering angles to the Rutherford prediction"></canvas>
+              <div class="chart-legend"><span><i class="chart-swatch swatch-observed"></i>Observed</span><span><i class="chart-swatch swatch-theory"></i>Predicted</span><span class="log-note">log scale</span></div>
+            </section>
+          </aside>
+        </section>
+
+        <section class="lesson-section" aria-labelledby="lesson-title">
+          <div class="lesson-heading">
+            <p class="eyebrow"><span>THE BIG IDEA</span><span class="eyebrow-rule"></span><span>HOW TO READ THE SIMULATION</span></p>
+            <h2 id="lesson-title">The evidence changed the model.</h2>
+          </div>
+          <div class="insight-grid">
+            <article class="insight-card">
+              <span class="insight-number">01 / MOST</span>
+              <h3>Pass straight through</h3>
+              <p>Most alpha particles miss the tiny, dense nucleus. That suggested atoms are mostly empty space.</p>
+            </article>
+            <article class="insight-card">
+              <span class="insight-number">02 / SOME</span>
+              <h3>Veer off course</h3>
+              <p>Positive alpha particles are repelled by the positive nucleus. A closer pass means a larger deflection.</p>
+            </article>
+            <article class="insight-card insight-featured">
+              <span class="insight-number">03 / RARE</span>
+              <h3>Turn back</h3>
+              <p>A few particles scatter through very large angles. Rutherford inferred that positive charge is concentrated in a compact nucleus.</p>
+            </article>
+          </div>
+          <div class="model-note">
+            <span class="model-note-icon" aria-hidden="true">i</span>
+            <p><strong>Model note</strong> This is a 2D view of one isolated gold nucleus with Coulomb repulsion only. The foil’s atoms, electrons, and 3D scattering geometry are not simulated, so the histogram illustrates the pattern rather than reproducing a measured foil result.</p>
+          </div>
+        </section>
+
+        <section class="decay-section" aria-labelledby="decay-title">
+          <div class="decay-intro">
+            <div>
+              <p class="eyebrow"><span>NUCLEAR TRANSFORMATIONS</span><span class="eyebrow-rule"></span><span>α · β⁻ · β⁺ · γ</span></p>
+              <h2 id="decay-title">Radioactive decay lab.</h2>
+              <p class="decay-lede">Choose a nucleus, change the decay mode, and follow every proton, neutron, and emitted particle.</p>
+            </div>
+            <div class="decay-intro-note"><span class="model-note-icon" aria-hidden="true">i</span><p>One event is animated at a time. The map tracks nuclear composition; the half-life clock models a whole sample.</p></div>
+          </div>
+
+          <div class="decay-modebar" role="tablist" aria-label="Decay mode">
+            <button class="decay-mode is-selected" type="button" role="tab" aria-selected="true" data-mode="alpha"><span>α</span><small>ALPHA</small></button>
+            <button class="decay-mode" type="button" role="tab" aria-selected="false" data-mode="betaMinus"><span>β⁻</span><small>BETA MINUS</small></button>
+            <button class="decay-mode" type="button" role="tab" aria-selected="false" data-mode="betaPlus"><span>β⁺</span><small>BETA PLUS</small></button>
+            <button class="decay-mode" type="button" role="tab" aria-selected="false" data-mode="gamma"><span>γ</span><small>GAMMA</small></button>
+          </div>
+
+          <div class="decay-controls">
+            <div class="decay-control">
+              <label for="decayPreset">Example nucleus</label>
+              <select id="decayPreset" aria-label="Choose a worked isotope example"></select>
+            </div>
+            <div class="decay-control element-control">
+              <label for="elementSelect">Element</label>
+              <select id="elementSelect" aria-label="Choose an element"></select>
+            </div>
+            <div class="decay-control number-control">
+              <label for="protonCount">Protons <abbr title="Atomic number">Z</abbr></label>
+              <input id="protonCount" type="number" min="1" max="118" value="84" inputmode="numeric" />
+            </div>
+            <div class="decay-control number-control">
+              <label for="neutronCount">Neutrons <abbr title="Neutron number">N</abbr></label>
+              <input id="neutronCount" type="number" min="0" max="220" value="126" inputmode="numeric" />
+            </div>
+            <div class="decay-control mass-control">
+              <span class="field-label">Mass number <abbr title="Protons plus neutrons">A</abbr></span>
+              <output id="massNumber">210</output>
+            </div>
+            <div class="decay-control gamma-energy-control" id="gammaEnergyControl" hidden>
+              <label for="gammaEnergy">Chosen γ energy</label>
+              <div class="gamma-energy-row"><input id="gammaEnergy" type="range" min="10" max="2000" step="0.5" value="140.5" /><output id="gammaEnergyValue">140.5 keV</output></div>
+            </div>
+          </div>
+
+          <div class="decay-main-grid">
+            <section class="decay-stage-card" aria-labelledby="decay-stage-title">
+              <div class="simulation-heading">
+                <div><span class="section-index">05</span><h3 id="decay-stage-title">One decay event</h3></div>
+                <span class="live-badge"><span class="pulse-dot"></span><span id="decayRunState">READY</span></span>
+              </div>
+              <div class="decay-canvas-wrap">
+                <canvas id="decayStage" role="img" aria-label="Animated diagram of a selected radioactive decay"></canvas>
+                <div class="decay-canvas-tag" id="decayCanvasTag">PARENT NUCLEUS</div>
+              </div>
+              <div class="decay-actions">
+                <button id="decayPlay" class="button button-primary" type="button">▶ <span>Animate decay</span></button>
+                <button id="decayStep" class="button button-quiet" type="button">Step event</button>
+                <button id="decayReset" class="button button-quiet" type="button">Reset view</button>
+                <label class="decay-switch"><input id="decayAuto" type="checkbox" /><span class="toggle-ui" aria-hidden="true"></span><span>Loop</span></label>
+                <label class="decay-speed"><span>Speed</span><input id="decaySpeed" type="range" min="0.5" max="2" step="0.1" value="1" aria-label="Decay animation speed" /></label>
+              </div>
+              <div class="decay-event-caption" id="decayEventCaption" aria-live="polite">Select a mode and animate one decay.</div>
+            </section>
+
+            <aside class="decay-readouts">
+              <section class="data-card decay-ledger">
+                <div class="card-heading"><span class="section-index">06</span><h3>Conservation ledger</h3></div>
+                <div class="nucleus-ledger">
+                  <div><span>PARENT</span><strong id="parentNotation">²¹⁰₈₄Po</strong><small id="parentCounts">84 p · 126 n</small></div>
+                  <span class="ledger-arrow" aria-hidden="true">→</span>
+                  <div><span id="daughterStateLabel">DAUGHTER</span><strong id="daughterNotation">²⁰⁶₈₂Pb</strong><small id="daughterCounts">82 p · 124 n</small></div>
+                </div>
+                <dl class="readout-list decay-facts">
+                  <dt>Δ protons, Δ neutrons</dt><dd id="changeCounts">−2, −2</dd>
+                  <dt>Mass number</dt><dd id="massCheck">210 → 206 + 4</dd>
+                  <dt>Emitted</dt><dd id="emittedProducts">⁴₂He nucleus</dd>
+                </dl>
+              </section>
+              <section class="data-card energy-card">
+                <div class="card-heading"><span class="section-index">07</span><h3>Energy check</h3></div>
+                <div class="energy-status" id="energyStatus"><span class="energy-status-dot"></span><strong>MODEL ESTIMATE</strong></div>
+                <div class="q-value"><span id="qValueLabel">Estimated Q</span><strong id="qValue">— MeV</strong></div>
+                <p id="energyExplanation">Choose a nucleus and mode to see the energy condition.</p>
+                <div class="energy-partition">
+                  <div class="partition-title">Where does the energy go?</div>
+                  <label id="betaEnergyControl" class="beta-energy-control" hidden for="betaShare"><span>Share given to β particle <output id="betaShareValue">50%</output></span><input id="betaShare" type="range" min="0" max="100" step="1" value="50" /></label>
+                  <p id="energyPartitionResult" class="partition-result">Run a transition to see its energy budget.</p>
+                  <small id="energyPartitionNote">A schematic energy split; beta spectra and decay probabilities are not simulated.</small>
+                </div>
+                <details class="formula-details"><summary>What is this estimate?</summary><p id="qFormulaNote">A liquid-drop binding-energy estimate. It is a classroom approximation, not evaluated isotope data.</p></details>
+              </section>
+            </aside>
+          </div>
+
+          <section class="data-card change-map-card" aria-labelledby="change-map-title">
+            <div class="map-heading">
+              <div class="card-heading"><span class="section-index">08</span><h3 id="change-map-title">Nuclide change map</h3></div>
+              <div class="map-axes"><span>horizontal: neutrons N</span><span>vertical: protons Z</span></div>
+            </div>
+            <p class="card-description">Each point is a nucleus. Click a point to choose its proton and neutron count; arrows show where each mode moves it.</p>
+            <div id="mapSelectionFeedback" class="map-selection-feedback" role="status" aria-live="polite"><span class="selection-pulse" aria-hidden="true"></span><span id="mapSelectionText">Selected nucleus</span></div>
+            <div id="nuclideMap" class="nuclide-map" role="region" aria-label="Interactive proton-neutron map for the selected nucleus"></div>
+            <div class="map-legend">
+              <span><i class="map-dot map-parent-dot"></i>Parent</span><span><i class="map-dot map-daughter-alpha"></i>α daughter</span><span><i class="map-dot map-daughter-minus"></i>β⁻ daughter</span><span><i class="map-dot map-daughter-plus"></i>β⁺ daughter</span><span><i class="map-dot map-daughter-gamma"></i>γ: same nuclide</span>
+            </div>
+            <div class="mode-rules" id="modeRules" aria-live="polite"></div>
+          </section>
+
+          <section class="data-card half-life-card" aria-labelledby="half-life-title">
+            <div class="half-life-heading">
+              <div><span class="section-index">09</span><h3 id="half-life-title">Half-life clock</h3><p>See how a population changes over time. Worked isotope presets load their evaluated half-life; edit it to explore another value. Custom nuclei keep the chosen value. Each nucleus has one random decay time, so the sample stays consistent as you scrub.</p></div>
+              <div class="clock-readout"><span>ELAPSED</span><strong id="elapsedClock">1.0 half-lives</strong></div>
+            </div>
+            <div class="clock-controls">
+              <label class="clock-slider"><span>Elapsed time <output id="elapsedValue">1.0 T½</output></span><input id="elapsedSlider" type="range" min="0" max="6" step="0.01" value="1" /><small>0 T½ <span>6 T½</span></small></label>
+              <label class="clock-slider"><span>Starting nuclei <output id="sampleValue">1000</output></span><input id="sampleSlider" type="range" min="10" max="10000" step="10" value="1000" /><small>10 <span>10,000</span></small></label>
+              <label class="decay-control half-life-input"><span>Chosen half-life</span><span class="half-life-entry"><input id="halfLifeValue" type="number" min="0.001" step="any" value="5730" /><select id="halfLifeUnit" aria-label="Half-life time unit"><option value="s">seconds</option><option value="min">minutes</option><option value="h">hours</option><option value="d">days</option><option value="y" selected>years</option></select></span></label>
+            </div>
+            <div class="clock-grid">
+              <section class="decay-cloud-card" aria-labelledby="decay-cloud-title">
+                <div class="decay-cloud-heading"><div><strong id="decay-cloud-title">Decay chamber · 360°</strong><span id="cloudCountLabel">Representative nuclei</span></div><button id="clockPlay" class="cloud-play" type="button" aria-label="Play half-life decay animation" aria-pressed="false">▶ <span>Play</span></button></div>
+                <canvas id="decayCloud" role="img" aria-label="Animated two-dimensional projection of randomly directed radioactive emissions around a sample of nuclei"></canvas>
+                <div id="cloudReadout" class="cloud-readout" aria-live="polite">Parents remain gold; daughters and emitted particles appear as nuclei decay.</div>
+                <p class="cloud-note">Top-down 2D view: each emission gets a random azimuth from 0°–360°. Real emission directions fill 3D space.</p>
+              </section>
+              <div class="clock-chart-wrap"><canvas id="halfLifeChart" role="img" aria-label="Graph of expected radioactive nuclei remaining over elapsed half-lives"></canvas></div>
+              <div class="clock-stats"><div><span>Expected remaining</span><strong id="expectedRemaining">500</strong></div><div><span>One random sample</span><strong id="sampleRemaining">—</strong></div><div><span>Elapsed time</span><strong id="elapsedReal">5730 years</strong></div><div><span>Expected fraction</span><strong id="remainingFraction">50.0%</strong></div></div>
+            </div>
+            <div class="clock-actions"><button id="clockReroll" class="button button-quiet" type="button">↻ New sample</button><span>Each nucleus gets its own random decay time. The expected population follows N₀ × 2<sup>−t/T½</sup>.</span></div>
+          </section>
+
+          <div class="model-note decay-model-note"><span class="model-note-icon" aria-hidden="true">i</span><p><strong>Model limits</strong> The composition changes follow nuclear bookkeeping exactly. The energy gate uses a liquid-drop approximation and can miss shell structure, excited states, and measured atomic-mass effects; it cannot predict half-lives or branching ratios. An event animation is a conservation diagram, not a claim that the selected decay is observed. The β⁺ view shows the positron branch; electron capture is not simulated. For evaluated isotope data, see the NNDC guides to <a href="https://www.nndc.bnl.gov/nudat3/help/alphadecay.jsp" target="_blank" rel="noreferrer">alpha decay</a>, <a href="https://www.nndc.bnl.gov/nudat3/help/betadecay.jsp" target="_blank" rel="noreferrer">beta decay</a>, and <a href="https://www.nndc.bnl.gov/nudat3/" target="_blank" rel="noreferrer">NuDat</a>. The Tc-99m 140.5 keV preset comes from <a href="https://www.nndc.bnl.gov/nudat3/getdecaydataset.jsp?dsid=99tc+it+decay+%286.0072+h%29&amp;nucleus=99TC" target="_blank" rel="noreferrer">evaluated ENSDF gamma data</a>.</p></div>
+        </section>
+      </main>
+
+      <footer class="footer"><span>PHYSICS LAB <span class="footer-sep">/</span> ATOMIC MODELS</span><span>Geiger–Marsden experiment · 1909–1913</span></footer>
+    </div>
+  </body>
+</html>
