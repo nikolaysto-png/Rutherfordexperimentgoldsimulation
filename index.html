@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f4f1e8" />
-    <meta name="description" content="Explore Rutherford scattering in an interactive alpha-particle simulation." />
-    <title>Rutherford scattering | Physics lab</title>
+    <meta name="description" content="Explore Rutherford scattering and radioactive decay with 3D emission directions, nuclear recoil, beta spectra, and a stochastic half-life model." />
+    <title>Nuclear physics | Interactive physics lab</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <script>
       (() => {
@@ -18,6 +18,8 @@
       })();
     </script>
     <link rel="stylesheet" href="styles.css" />
+    <script src="physics.js" defer></script>
+    <script src="rutherford.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -105,7 +107,7 @@
                 <dt>Particles detected</dt><dd id="sTotal">0</dd>
                 <dt>Deflected &gt; 5°</dt><dd id="sDef">0 <small>—</small></dd>
                 <dt>Scattered &gt; 90°</dt><dd id="sBack">0 <small>—</small></dd>
-                <dt>Mean angle error</dt><dd id="sDev">—</dd>
+                <dt>Asymptotic angle error</dt><dd id="sDev">—</dd>
               </dl>
             </section>
 
@@ -142,7 +144,7 @@
           </div>
           <div class="model-note">
             <span class="model-note-icon" aria-hidden="true">i</span>
-            <p><strong>Model note</strong> This is a 2D view of one isolated gold nucleus with Coulomb repulsion only. The foil’s atoms, electrons, and 3D scattering geometry are not simulated, so the histogram illustrates the pattern rather than reproducing a measured foil result.</p>
+            <p><strong>Model note</strong> This is a 2D view of one isolated gold nucleus with Coulomb repulsion only. The foil’s atoms, electrons, and 3D scattering geometry are not simulated, so the histogram illustrates the pattern rather than reproducing a measured foil result. Beam energies and impact parameters refer to the incoming asymptote. Detection extrapolates the outgoing Coulomb orbit to infinity. The display zooms out at low energy to keep the turning point visible.</p>
           </div>
         </section>
 
@@ -163,6 +165,7 @@
             <button class="decay-mode" type="button" role="tab" aria-selected="false" data-mode="gamma"><span>γ</span><small>GAMMA</small></button>
           </div>
 
+          <label class="keep-nucleus"><input id="keepNucleus" type="checkbox" /> Keep my nucleus when switching decay modes</label>
           <div class="decay-controls">
             <div class="decay-control">
               <label for="decayPreset">Example nucleus</label>
@@ -197,13 +200,14 @@
                 <span class="live-badge"><span class="pulse-dot"></span><span id="decayRunState">READY</span></span>
               </div>
               <div class="decay-canvas-wrap">
-                <canvas id="decayStage" role="img" aria-label="Animated diagram of a selected radioactive decay"></canvas>
+                <canvas id="decayStage" role="img" tabindex="0" aria-label="Three-dimensional decay event. Drag or use arrow keys to rotate the view."></canvas>
                 <div class="decay-canvas-tag" id="decayCanvasTag">PARENT NUCLEUS</div>
               </div>
+              <div class="orbit-toolbar"><span>DRAG TO ORBIT · ARROW KEYS ALSO WORK</span><button id="eventViewReset" class="view-reset" type="button">Reset view</button><label><input id="eventRotate" type="checkbox" /> Auto-rotate</label></div>
               <div class="decay-actions">
                 <button id="decayPlay" class="button button-primary" type="button">▶ <span>Animate decay</span></button>
                 <button id="decayStep" class="button button-quiet" type="button">Step event</button>
-                <button id="decayReset" class="button button-quiet" type="button">Reset view</button>
+                <button id="decayReset" class="button button-quiet" type="button">Reset event</button>
                 <label class="decay-switch"><input id="decayAuto" type="checkbox" /><span class="toggle-ui" aria-hidden="true"></span><span>Loop</span></label>
                 <label class="decay-speed"><span>Speed</span><input id="decaySpeed" type="range" min="0.5" max="2" step="0.1" value="1" aria-label="Decay animation speed" /></label>
               </div>
@@ -231,9 +235,14 @@
                 <p id="energyExplanation">Choose a nucleus and mode to see the energy condition.</p>
                 <div class="energy-partition">
                   <div class="partition-title">Where does the energy go?</div>
-                  <label id="betaEnergyControl" class="beta-energy-control" hidden for="betaShare"><span>Share given to β particle <output id="betaShareValue">50%</output></span><input id="betaShare" type="range" min="0" max="100" step="1" value="50" /></label>
+                  <div id="betaEnergyControl" class="beta-energy-control" hidden>
+                    <label for="betaSampling">Beta energy</label><select id="betaSampling"><option value="spectrum">Sample the continuous spectrum</option><option value="manual">Set energy manually</option></select>
+                    <label for="betaShare"><span>Fraction of endpoint <output id="betaShareValue">50%</output></span></label><input id="betaShare" type="range" min="0" max="100" step="1" value="50" disabled />
+                    <canvas id="betaSpectrum" role="img" aria-label="Approximate allowed beta-energy spectrum and selected event energy"></canvas>
+                    <span class="spectrum-legend">APPROXIMATE ALLOWED SPECTRUM · NOT MEASURED DATA</span>
+                  </div>
                   <p id="energyPartitionResult" class="partition-result">Run a transition to see its energy budget.</p>
-                  <small id="energyPartitionNote">A schematic energy split; beta spectra and decay probabilities are not simulated.</small>
+                  <small id="energyPartitionNote">Energy and momentum are balanced for a parent initially at rest.</small><p id="eventSpeed" class="event-speed"></p>
                 </div>
                 <details class="formula-details"><summary>What is this estimate?</summary><p id="qFormulaNote">A liquid-drop binding-energy estimate. It is a classroom approximation, not evaluated isotope data.</p></details>
               </section>
@@ -264,20 +273,22 @@
               <label class="clock-slider"><span>Starting nuclei <output id="sampleValue">1000</output></span><input id="sampleSlider" type="range" min="10" max="10000" step="10" value="1000" /><small>10 <span>10,000</span></small></label>
               <label class="decay-control half-life-input"><span>Chosen half-life</span><span class="half-life-entry"><input id="halfLifeValue" type="number" min="0.001" step="any" value="5730" /><select id="halfLifeUnit" aria-label="Half-life time unit"><option value="s">seconds</option><option value="min">minutes</option><option value="h">hours</option><option value="d">days</option><option value="y" selected>years</option></select></span></label>
             </div>
+            <div class="clock-extra"><p id="halfLifeSource">Preset parent half-life</p><label for="clockRate">Clock speed <input id="clockRate" type="range" min="0.05" max="1" step="0.05" value="0.25" /><output id="clockRateValue">0.25 T½/s</output></label></div>
             <div class="clock-grid">
               <section class="decay-cloud-card" aria-labelledby="decay-cloud-title">
-                <div class="decay-cloud-heading"><div><strong id="decay-cloud-title">Decay chamber · 360°</strong><span id="cloudCountLabel">Representative nuclei</span></div><button id="clockPlay" class="cloud-play" type="button" aria-label="Play half-life decay animation" aria-pressed="false">▶ <span>Play</span></button></div>
-                <canvas id="decayCloud" role="img" aria-label="Animated two-dimensional projection of randomly directed radioactive emissions around a sample of nuclei"></canvas>
+                <div class="decay-cloud-heading"><div><strong id="decay-cloud-title">Decay chamber · 3D</strong><span id="cloudCountLabel">Representative nuclei</span></div><button id="clockPlay" class="cloud-play" type="button" aria-label="Play half-life decay animation" aria-pressed="false">▶ <span>Play</span></button></div>
+                <canvas id="decayCloud" role="img" tabindex="0" aria-label="Three-dimensional sample with isotropic emission directions. Drag or use arrow keys to rotate."></canvas>
+                <div class="orbit-toolbar"><button id="cloudViewReset" class="view-reset" type="button">Reset view</button><label><input id="cloudRotate" type="checkbox" checked /> Rotate</label></div>
                 <div id="cloudReadout" class="cloud-readout" aria-live="polite">Parents remain gold; daughters and emitted particles appear as nuclei decay.</div>
-                <p class="cloud-note">Top-down 2D view: each emission gets a random azimuth from 0°–360°. Real emission directions fill 3D space.</p>
+                <p class="cloud-note">Drag to orbit. Directions are uniform over a 3D sphere for an unpolarized source. Trails show emission directions, not a detector signal; their duration and length are exaggerated.</p>
               </section>
-              <div class="clock-chart-wrap"><canvas id="halfLifeChart" role="img" aria-label="Graph of expected radioactive nuclei remaining over elapsed half-lives"></canvas></div>
-              <div class="clock-stats"><div><span>Expected remaining</span><strong id="expectedRemaining">500</strong></div><div><span>One random sample</span><strong id="sampleRemaining">—</strong></div><div><span>Elapsed time</span><strong id="elapsedReal">5730 years</strong></div><div><span>Expected fraction</span><strong id="remainingFraction">50.0%</strong></div></div>
+              <div class="clock-chart-wrap"><canvas id="halfLifeChart" role="img" aria-label="Expected exponential decay, random sample staircase, and one standard deviation band"></canvas><div class="population-legend"><span>— Expected</span><span>— This sample</span><span>Shading: ±1σ</span></div></div>
+              <div class="clock-stats"><div><span>Expected remaining</span><strong id="expectedRemaining">500</strong></div><div><span>One random sample</span><strong id="sampleRemaining">—</strong></div><div><span>Elapsed time</span><strong id="elapsedReal">5730 years</strong></div><div><span>Expected fraction</span><strong id="remainingFraction">50.0%</strong></div><div><span>Expected activity</span><strong id="activityValue">— Bq</strong></div><div><span>Count spread (1σ)</span><strong id="countSpread">—</strong></div></div>
             </div>
-            <div class="clock-actions"><button id="clockReroll" class="button button-quiet" type="button">↻ New sample</button><span>Each nucleus gets its own random decay time. The expected population follows N₀ × 2<sup>−t/T½</sup>.</span></div>
+            <div class="clock-actions"><button id="clockReroll" class="button button-quiet" type="button">↻ New sample</button><span>The same sample is preserved when paused or scrubbed. Activity = λN; λ = ln(2)/T½. The expected population follows N₀ × 2<sup>−t/T½</sup>.</span></div>
           </section>
 
-          <div class="model-note decay-model-note"><span class="model-note-icon" aria-hidden="true">i</span><p><strong>Model limits</strong> The composition changes follow nuclear bookkeeping exactly. The energy gate uses a liquid-drop approximation and can miss shell structure, excited states, and measured atomic-mass effects; it cannot predict half-lives or branching ratios. An event animation is a conservation diagram, not a claim that the selected decay is observed. The β⁺ view shows the positron branch; electron capture is not simulated. For evaluated isotope data, see the NNDC guides to <a href="https://www.nndc.bnl.gov/nudat3/help/alphadecay.jsp" target="_blank" rel="noreferrer">alpha decay</a>, <a href="https://www.nndc.bnl.gov/nudat3/help/betadecay.jsp" target="_blank" rel="noreferrer">beta decay</a>, and <a href="https://www.nndc.bnl.gov/nudat3/" target="_blank" rel="noreferrer">NuDat</a>. The Tc-99m 140.5 keV preset comes from <a href="https://www.nndc.bnl.gov/nudat3/getdecaydataset.jsp?dsid=99tc+it+decay+%286.0072+h%29&amp;nucleus=99TC" target="_blank" rel="noreferrer">evaluated ENSDF gamma data</a>.</p></div>
+          <div class="model-note decay-model-note"><span class="model-note-icon" aria-hidden="true">i</span><p><strong>Model limits</strong> The composition changes follow nuclear bookkeeping exactly. The energy gate uses a liquid-drop approximation and can miss shell structure, excited states, and measured atomic-mass effects; it cannot predict half-lives or branching ratios. An event animation is a conservation diagram, not a claim that the selected decay is observed. The 3D directions assume an unpolarized source; beta–neutrino angular correlations are omitted. The beta spectrum uses an allowed-shape, point-Coulomb approximation, not a measured spectrum. Recoil uses relativistic kinematics and approximate nuclear masses (A × u). Nucleus sizes, recoil displacement and emission time are enlarged for visibility. The β⁺ view follows only the positron branch; electron capture, annihilation, internal conversion and subsequent daughter decays are not simulated. The population clock follows parent survival, not branching fractions or photon yields. For decay kinematics, see the <a href="https://geant4.web.cern.ch/documentation/dev/prm_html/PhysicsReferenceManual/hadronic/Radioactive/radDecay.html" target="_blank" rel="noreferrer">Geant4 physics reference</a>. For evaluated isotope data, see the NNDC guides to <a href="https://www.nndc.bnl.gov/nudat3/help/alphadecay.jsp" target="_blank" rel="noreferrer">alpha decay</a>, <a href="https://www.nndc.bnl.gov/nudat3/help/betadecay.jsp" target="_blank" rel="noreferrer">beta decay</a>, and <a href="https://www.nndc.bnl.gov/nudat3/" target="_blank" rel="noreferrer">NuDat</a>. The Tc-99m 140.5 keV preset comes from <a href="https://www.nndc.bnl.gov/nudat3/getdecaydataset.jsp?dsid=99tc+it+decay+%286.0072+h%29&amp;nucleus=99TC" target="_blank" rel="noreferrer">evaluated ENSDF gamma data</a>.</p></div>
         </section>
       </main>
 

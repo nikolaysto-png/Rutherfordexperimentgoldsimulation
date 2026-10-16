@@ -423,3 +423,35 @@ h1 em { color: var(--green); font-weight: 400; }
   .clock-stats div { align-items: flex-start; flex-direction: column; gap: 3px; }
   .clock-actions { align-items: flex-start; flex-direction: column; }
 }
+
+/* Spatial decay controls retain the original lab palette and compact typography. */
+.keep-nucleus { display: flex; align-items: center; gap: 8px; margin: -2px 0 12px; color: var(--muted); font-size: 11px; }
+.keep-nucleus input, .orbit-toolbar input { accent-color: var(--gold); }
+.orbit-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 9px 2px; color: var(--muted); font: 9px/1.5 var(--mono); }
+.orbit-toolbar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.orbit-toolbar > span { font-size: 8px; letter-spacing: .06em; }
+.view-reset { padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--ink); font: inherit; cursor: pointer; }
+#decayStage, #decayCloud { touch-action: none; cursor: grab; }
+#decayStage:active, #decayCloud:active { cursor: grabbing; }
+#decayStage:focus-visible, #decayCloud:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+#decayStage { height: 370px; }
+#decayCloud { height: 245px; }
+.decay-cloud-card .orbit-toolbar { color: #a9baaa; }
+.decay-cloud-card .view-reset { background: #23382d; color: #f2ead6; border-color: #45604d; }
+#betaSampling { width: 100%; min-height: 32px; padding: 5px; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; font: 10px var(--sans); }
+#betaSpectrum { display: block; width: 100%; height: 102px; }
+.beta-energy-control > label { display: block; }
+.beta-energy-control > label span { display: flex; }
+.spectrum-legend { font: 7px/1.5 var(--mono); }
+.event-speed { padding-top: 5px; border-top: 1px solid var(--line); font: 9px/1.5 var(--mono) !important; }
+.population-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; color: var(--muted); font: 8px var(--mono); }
+.population-legend span:first-child { color: var(--green-dark); }
+.population-legend span:nth-child(2) { color: #508ac3; }
+.clock-extra { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 8px 0 14px; font: 9px/1.5 var(--mono); color: var(--muted); }
+.clock-extra p { margin: 0; }
+.clock-extra label { display: flex; align-items: center; gap: 8px; }
+.clock-extra input { width: 100px; accent-color: var(--green); }
+.clock-extra output { min-width: 70px; }
+.button:disabled, .cloud-play:disabled { cursor: not-allowed; opacity: .45; }
+input[aria-invalid="true"] { outline: 1px solid #cf785f; }
+@media (max-width: 600px) { #decayStage { height: 320px; } #decayCloud { height: 260px; } .clock-extra label { flex-wrap: wrap; } }

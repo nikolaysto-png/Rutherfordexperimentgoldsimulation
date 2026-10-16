@@ -1,570 +1,10 @@
-(() => {
-  "use strict";
-
-  // ---------- Physics constants and scale ----------
-  const Z_ALPHA = 2;
-  const Z_GOLD = 79;
-  const K_E2 = 1.439964; // k·e² in MeV·fm
-  const M_ALPHA_MEV = 3727.379;
-  const E_REF_MEV = 5;
-  const R_GOLD_FM = 1.2 * Math.cbrt(197);
-  const C_MS = 2.99792458e8;
-  const PX_PER_FM = 6 / R_GOLD_FM;
-  const NUCLEUS_PX = R_GOLD_FM * PX_PER_FM;
-  const V_REF_PX = 190;
-  const K_PX = (K_E2 * Z_ALPHA * Z_GOLD / E_REF_MEV) * PX_PER_FM * V_REF_PX * V_REF_PX / 2;
-  const MARGIN = 14;
-  const BINS = 18;
-  const MONO = 'ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
-
-  const $ = (id) => document.getElementById(id);
-  const root = document.documentElement;
-  const stage = $("stage");
-  const ctx = stage.getContext("2d");
-  const hist = $("hist");
-  const hctx = hist.getContext("2d");
-  const speedInput = $("speed");
-  const rateInput = $("rate");
-  const showTheory = $("showTheory");
-  const pauseBtn = $("pause");
-  const resetBtn = $("reset");
-  const themeBtn = $("theme");
-  const themeLabel = $("themeLabel");
-  const runState = $("runState");
-
-  let W = 0, H = 0, HW = 0, HH = 0, dpr = 1;
-  let energy = Number(speedInput.value);
-  let speedFactor = Math.sqrt(energy / E_REF_MEV);
-  let rate = Number(rateInput.value);
-  let paused = false;
-  let particles = [];
-  let flashes = [];
-  let spawnTimer = 0;
-  let time = 0;
-  let stats, measured, predicted;
-  let theoryPaths = [];
-
-  function closestApproachFm(E) {
-    return K_E2 * Z_ALPHA * Z_GOLD / E;
-  }
-
-  function speedFractionC(E) {
-    const gamma = 1 + E / M_ALPHA_MEV;
-    return Math.sqrt(1 - 1 / (gamma * gamma));
-  }
-
-  const cx = () => W / 2;
-  const cy = () => H / 2;
-  const energyMeV = () => energy;
-
-  function resetStats() {
-    stats = { total: 0, def5: 0, back: 0, devSum: 0, maxErr: 0 };
-    measured = new Array(BINS).fill(0);
-    predicted = new Array(BINS).fill(0);
-  }
-
-  function resize() {
-    const oldW = W, oldH = H;
-    const stageRect = stage.getBoundingClientRect();
-    const histRect = hist.getBoundingClientRect();
-    W = stageRect.width;
-    H = stageRect.height;
-    HW = histRect.width;
-    HH = histRect.height;
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-
-    stage.width = Math.round(W * dpr);
-    stage.height = Math.round(H * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    hist.width = Math.round(HW * dpr);
-    hist.height = Math.round(HH * dpr);
-    hctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    if (oldW && oldH) {
-      const shiftX = cx() - oldW / 2;
-      const shiftY = cy() - oldH / 2;
-      for (const p of particles) {
-        p.x += shiftX;
-        p.y += shiftY;
-        for (let i = 0; i < p.trail.length; i += 2) {
-          p.trail[i] += shiftX;
-          p.trail[i + 1] += shiftY;
-        }
-      }
-      for (const f of flashes) { f.x += shiftX; f.y += shiftY; }
-    }
-    rebuildTheoryPaths();
-  }
-
-  window.addEventListener("resize", resize, { passive: true });
-
-  function spawn() {
-    const v = V_REF_PX * speedFactor;
-    const halfBeam = Math.max(1, H / 2 - MARGIN);
-    const b = (Math.random() * 2 - 1) * halfBeam;
-    const dPx = 2 * K_PX / (v * v);
-    const impact = Math.max(Math.abs(b), 1e-9);
-    const launchRadius = Math.hypot(cx() + 6, b);
-
-    particles.push({
-      x: -6,
-      y: cy() + b,
-      vx: v,
-      vy: 0,
-      v0: v,
-      b,
-      dPx,
-      halfBeam,
-      launchRadius,
-      theoryTheta: 2 * Math.atan(dPx / (2 * impact)),
-      trail: [],
-    });
-  }
-
-  // Uniformly charged sphere inside, inverse-square Coulomb field outside.
-  function accel(dx, dy, out) {
-    const r2 = dx * dx + dy * dy;
-    const r = Math.sqrt(r2);
-    const a = r >= NUCLEUS_PX
-      ? K_PX / r2
-      : K_PX * r / (NUCLEUS_PX * NUCLEUS_PX * NUCLEUS_PX);
-    const inv = r > 1e-9 ? 1 / r : 0;
-    out[0] = a * dx * inv;
-    out[1] = a * dy * inv;
-  }
-
-  // Velocity Verlet with adaptive steps capped by travel distance and radius.
-  const aTmp = [0, 0];
-  function integrate(p, dt) {
-    let remaining = dt;
-    let dx = p.x - cx(), dy = p.y - cy();
-    accel(dx, dy, aTmp);
-    let ax = aTmp[0], ay = aTmp[1];
-    let guard = 0;
-    while (remaining > 1e-9 && guard++ < 4000) {
-      const r = Math.hypot(dx, dy);
-      const v = Math.hypot(p.vx, p.vy) || 1e-6;
-      const a = Math.hypot(ax, ay) || 1e-9;
-      let h = Math.min(
-        0.6 / v,
-        0.04 * r / v,
-        Math.sqrt(0.08 * Math.max(r, 0.5) / a),
-        remaining,
-      );
-      h = Math.min(remaining, Math.max(h, 1e-6));
-      p.vx += 0.5 * ax * h;
-      p.vy += 0.5 * ay * h;
-      p.x += p.vx * h;
-      p.y += p.vy * h;
-      dx = p.x - cx();
-      dy = p.y - cy();
-      accel(dx, dy, aTmp);
-      ax = aTmp[0];
-      ay = aTmp[1];
-      p.vx += 0.5 * ax * h;
-      p.vy += 0.5 * ay * h;
-      remaining -= h;
-    }
-  }
-
-  function predictedFraction(p, thetaDeg) {
-    if (thetaDeg <= 0) return 1;
-    const theta = thetaDeg * Math.PI / 180;
-    const bMax = (p.dPx / 2) / Math.tan(theta / 2);
-    return Math.min(1, bMax / p.halfBeam);
-  }
-
-  function detect(p) {
-    const theta = Math.atan2(p.vy, p.vx);
-    const deg = Math.abs(theta) * 180 / Math.PI;
-    stats.total++;
-    if (deg > 5) stats.def5++;
-    if (deg > 90) stats.back++;
-    stats.devSum += Math.abs(deg - p.theoryTheta * 180 / Math.PI);
-
-    // Coulomb repulsion has positive potential energy: E = ½mv² + kq₁q₂/r.
-    const vExit = Math.hypot(p.vx, p.vy);
-    const dist = Math.max(1e-9, Math.hypot(p.x - cx(), p.y - cy()));
-    const eOut = 0.5 * vExit * vExit + K_PX / dist;
-    const eIn = 0.5 * p.v0 * p.v0 + K_PX / p.launchRadius;
-    stats.maxErr = Math.max(stats.maxErr, Math.abs(eOut - eIn) / Math.max(Math.abs(eIn), 1e-9));
-
-    measured[Math.min(BINS - 1, Math.floor(deg / (180 / BINS)))]++;
-    for (let i = 0; i < BINS; i++) {
-      const lo = i * 180 / BINS;
-      const hi = (i + 1) * 180 / BINS;
-      predicted[i] += predictedFraction(p, lo) - (i === BINS - 1 ? 0 : predictedFraction(p, hi));
-    }
-    flashes.push({
-      x: Math.min(W, Math.max(0, p.x)),
-      y: Math.min(H, Math.max(0, p.y)),
-      t: 0,
-      deg,
-    });
-  }
-
-  function step(dt) {
-    time += dt;
-    for (const p of particles) {
-      integrate(p, dt);
-      p.trail.push(p.x, p.y);
-      if (p.trail.length > 90) p.trail.splice(0, 2);
-    }
-    const keep = [];
-    for (const p of particles) {
-      const out = p.x > W + 2 || p.x < -8 || p.y < -2 || p.y > H + 2;
-      if (out) detect(p); // Include alpha particles that scatter back toward the source.
-      else keep.push(p);
-    }
-    particles = keep;
-    for (const f of flashes) f.t += dt;
-    flashes = flashes.filter((f) => f.t < 0.9);
-  }
-
-  // ---------- Canvas rendering ----------
-  function angleColor(deg, alpha) {
-    const t = Math.min(1, deg / 90);
-    const r = Math.round(170 + 85 * Math.min(1, t * 2));
-    const g = Math.round(215 - 140 * t);
-    const b = Math.round(255 - 215 * Math.min(1, t * 1.5));
-    return `rgba(${r},${g},${b},${alpha})`;
-  }
-
-  function drawBackground() {
-    const gradient = ctx.createRadialGradient(cx(), cy(), 0, cx(), cy(), Math.max(W, H) * 0.72);
-    gradient.addColorStop(0, "#152522");
-    gradient.addColorStop(1, "#07100f");
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, W, H);
-
-    const gridStep = 100 * PX_PER_FM;
-    ctx.strokeStyle = "rgba(156,190,170,0.08)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = cx() % gridStep; x < W; x += gridStep) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
-    for (let y = cy() % gridStep; y < H; y += gridStep) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
-    ctx.stroke();
-
-    ctx.setLineDash([4, 8]);
-    ctx.strokeStyle = "rgba(180,206,187,0.22)";
-    ctx.beginPath();
-    ctx.moveTo(0, cy());
-    ctx.lineTo(W, cy());
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    ctx.strokeStyle = "rgba(132,205,161,0.16)";
-    ctx.lineWidth = 5;
-    ctx.strokeRect(2.5, 2.5, W - 5, H - 5);
-
-    const barPx = 200 * PX_PER_FM;
-    ctx.strokeStyle = "rgba(230,236,223,0.65)";
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.moveTo(20, H - 22); ctx.lineTo(20 + barPx, H - 22);
-    ctx.moveTo(20, H - 27); ctx.lineTo(20, H - 17);
-    ctx.moveTo(20 + barPx, H - 27); ctx.lineTo(20 + barPx, H - 17);
-    ctx.stroke();
-    ctx.fillStyle = "rgba(230,236,223,0.75)";
-    ctx.font = `10px ${MONO}`;
-    ctx.fillText("200 fm", 20, H - 31);
-  }
-
-  function buildTheoryPath(b, sign, v, maxSteps) {
-    let x = -6;
-    let y = cy() + sign * b;
-    let vx = v, vy = 0;
-    const points = [x, y];
-    for (let i = 0; i < maxSteps; i++) {
-      const dx = x - cx(), dy = y - cy(), r = Math.hypot(dx, dy);
-      const a = r >= NUCLEUS_PX ? K_PX / (r * r) : K_PX * r / (NUCLEUS_PX ** 3);
-      const sp = Math.hypot(vx, vy) || 1e-6;
-      const h = Math.min(1.0 / sp, 0.04 * r / sp);
-      vx += 0.5 * a * dx / r * h;
-      vy += 0.5 * a * dy / r * h;
-      x += vx * h;
-      y += vy * h;
-      const dx2 = x - cx(), dy2 = y - cy(), r2 = Math.hypot(dx2, dy2);
-      const a2 = r2 >= NUCLEUS_PX ? K_PX / (r2 * r2) : K_PX * r2 / (NUCLEUS_PX ** 3);
-      vx += 0.5 * a2 * dx2 / r2 * h;
-      vy += 0.5 * a2 * dy2 / r2 * h;
-      points.push(x, y);
-      if (x > W || x < -8 || y < 0 || y > H) break;
-    }
-    return points;
-  }
-
-  function rebuildTheoryPaths() {
-    if (!ctx || !W || !H) return;
-    const v = V_REF_PX * speedFactor;
-    const d = 2 * K_PX / (v * v);
-    const impacts = [0.25, 0.5, 1, 2, 4].map((m) => m * d / 2).filter((b) => b < H / 2 - MARGIN);
-    theoryPaths = [];
-    for (const b of impacts) {
-      for (const sign of [1, -1]) theoryPaths.push(buildTheoryPath(b, sign, v, 4000));
-    }
-  }
-
-  function drawTheoryPaths() {
-    ctx.save();
-    ctx.setLineDash([3, 5]);
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(117,184,255,0.48)";
-    for (const points of theoryPaths) {
-      if (points.length < 4) continue;
-      ctx.beginPath();
-      ctx.moveTo(points[0], points[1]);
-      for (let i = 2; i < points.length; i += 2) ctx.lineTo(points[i], points[i + 1]);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  function drawNucleus() {
-    const v = V_REF_PX * speedFactor;
-    const d = 2 * K_PX / (v * v);
-    ctx.save();
-    ctx.setLineDash([5, 6]);
-    ctx.strokeStyle = "rgba(240,190,72,0.52)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(cx(), cy(), d, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = "rgba(251,218,137,0.9)";
-    ctx.font = `10px ${MONO}`;
-    ctx.fillText(`d = ${closestApproachFm(energyMeV()).toFixed(1)} fm`, Math.min(W - 122, cx() + d * 0.65 + 6), Math.max(20, cy() - d * 0.72 - 6));
-    ctx.restore();
-
-    const pulse = 0.85 + 0.15 * Math.sin(time * 2.2);
-    const halo = ctx.createRadialGradient(cx(), cy(), NUCLEUS_PX * 0.5, cx(), cy(), NUCLEUS_PX * 9 * pulse);
-    halo.addColorStop(0, "rgba(255,208,104,0.65)");
-    halo.addColorStop(0.25, "rgba(255,178,58,0.2)");
-    halo.addColorStop(1, "rgba(255,160,40,0)");
-    ctx.fillStyle = halo;
-    ctx.beginPath();
-    ctx.arc(cx(), cy(), NUCLEUS_PX * 9, 0, Math.PI * 2);
-    ctx.fill();
-
-    const nucleus = ctx.createRadialGradient(cx() - 2, cy() - 2, 0.5, cx(), cy(), NUCLEUS_PX);
-    nucleus.addColorStop(0, "#fff5cb");
-    nucleus.addColorStop(0.45, "#f5c74f");
-    nucleus.addColorStop(1, "#a96b20");
-    ctx.shadowBlur = 16;
-    ctx.shadowColor = "#f0b429";
-    ctx.fillStyle = nucleus;
-    ctx.beginPath();
-    ctx.arc(cx(), cy(), NUCLEUS_PX, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "rgba(255,235,184,0.95)";
-    ctx.font = `10px ${MONO}`;
-    ctx.fillText("Au +79e", cx() + 11, cy() + 4);
-  }
-
-  function drawParticles() {
-    ctx.lineCap = "round";
-    for (const p of particles) {
-      const deg = Math.abs(Math.atan2(p.vy, p.vx)) * 180 / Math.PI;
-      const n = p.trail.length / 2;
-      for (let i = 1; i < n; i++) {
-        const t = i / n;
-        ctx.strokeStyle = angleColor(deg, t * 0.62);
-        ctx.lineWidth = 0.6 + 1.5 * t;
-        ctx.beginPath();
-        ctx.moveTo(p.trail[(i - 1) * 2], p.trail[(i - 1) * 2 + 1]);
-        ctx.lineTo(p.trail[i * 2], p.trail[i * 2 + 1]);
-        ctx.stroke();
-      }
-      ctx.shadowBlur = 9;
-      ctx.shadowColor = angleColor(deg, 1);
-      ctx.fillStyle = "#fff";
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 2.25, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-    }
-  }
-
-  function drawFlashes() {
-    for (const f of flashes) {
-      const alpha = 1 - f.t / 0.9;
-      const gradient = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, 20);
-      gradient.addColorStop(0, `rgba(190,255,220,${0.85 * alpha})`);
-      gradient.addColorStop(1, "rgba(190,255,220,0)");
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(f.x, f.y, 25, 0, Math.PI * 2);
-      ctx.fill();
-      if (f.deg > 5) {
-        ctx.fillStyle = `rgba(235,255,240,${alpha})`;
-        ctx.font = `10px ${MONO}`;
-        ctx.fillText(`${f.deg.toFixed(0)}°`, Math.min(W - 38, Math.max(7, f.x + 9)), Math.min(H - 8, Math.max(16, f.y - 8)));
-      }
-    }
-  }
-
-  function draw() {
-    drawBackground();
-    if (showTheory.checked) drawTheoryPaths();
-    drawNucleus();
-    drawParticles();
-    drawFlashes();
-  }
-
-  function drawHist() {
-    if (!HW || !HH) return;
-    const style = getComputedStyle(root);
-    const muted = style.getPropertyValue("--muted").trim();
-    const line = style.getPropertyValue("--line").trim();
-    const gold = style.getPropertyValue("--gold").trim();
-    const blue = style.getPropertyValue("--blue").trim();
-    hctx.clearRect(0, 0, HW, HH);
-    const padL = 34, padT = 8, padB = 22;
-    const w = (HW - padL - 4) / BINS;
-    const h0 = HH - padB;
-    const maxV = Math.max(1, ...measured, ...predicted);
-    const scale = (v) => (v <= 0 ? 0 : Math.log10(v + 1) / Math.log10(maxV + 1)) * (h0 - padT);
-
-    hctx.font = `9px ${MONO}`;
-    hctx.fillStyle = muted;
-    hctx.strokeStyle = line;
-    hctx.lineWidth = 1;
-    for (let value = 1; value <= maxV; value *= 10) {
-      const y = Math.round(h0 - scale(value)) + 0.5;
-      hctx.globalAlpha = 0.55;
-      hctx.beginPath();
-      hctx.moveTo(padL, y);
-      hctx.lineTo(HW, y);
-      hctx.stroke();
-      hctx.globalAlpha = 1;
-      hctx.fillText(String(value), 2, y + 3);
-    }
-
-    for (let i = 0; i < BINS; i++) {
-      const x = padL + i * w;
-      const hm = scale(measured[i]);
-      const hp = scale(predicted[i]);
-      hctx.globalAlpha = 0.92;
-      hctx.fillStyle = gold;
-      hctx.fillRect(x + 1, h0 - hm, w * 0.55, hm);
-      hctx.globalAlpha = 0.84;
-      hctx.fillStyle = blue;
-      hctx.fillRect(x + 1 + w * 0.55, h0 - hp, w * 0.4, hp);
-    }
-    hctx.globalAlpha = 1;
-    hctx.fillStyle = muted;
-    for (let i = 0; i < BINS; i += 3) hctx.fillText(`${i * 10}°`, padL + i * w, HH - 6);
-    hctx.textAlign = "right";
-    hctx.fillText("180°", HW, HH - 6);
-    hctx.textAlign = "left";
-    hctx.strokeStyle = line;
-    hctx.beginPath();
-    hctx.moveTo(padL, h0 + 0.5);
-    hctx.lineTo(HW, h0 + 0.5);
-    hctx.stroke();
-  }
-
-  function updateReadouts() {
-    const E = energyMeV();
-    const beta = speedFractionC(E);
-    $("kE").textContent = `${E.toFixed(2)} MeV`;
-    $("kV").textContent = `${(beta * C_MS / 1e6).toFixed(1)} Mm/s (${(beta * 100).toFixed(2)}% c)`;
-    $("kD").textContent = `${closestApproachFm(E).toFixed(1)} fm`;
-    const err = stats.maxErr * 100;
-    const errEl = $("kErr");
-    errEl.textContent = stats.total ? `max drift ${err.toFixed(3)}%` : "Awaiting detection";
-    errEl.className = stats.total && err > 0.5 ? "warn" : "";
-    $("sTotal").textContent = String(stats.total);
-    const percent = (n) => stats.total ? ` (${(100 * n / stats.total).toFixed(1)}%)` : " (—)";
-    $("sDef").innerHTML = `${stats.def5}<small>${percent(stats.def5)}</small>`;
-    $("sBack").innerHTML = `${stats.back}<small>${percent(stats.back)}</small>`;
-    $("sDev").textContent = stats.total ? `${(stats.devSum / stats.total).toFixed(2)}°` : "—";
-    speedInput.setAttribute("aria-valuetext", `${E.toFixed(1)} MeV`);
-  }
-
-  function setTheme(theme) {
-    root.dataset.theme = theme;
-    themeLabel.textContent = theme === "dark" ? "Light mode" : "Dark mode";
-    themeBtn.setAttribute("aria-label", `Switch to ${theme === "dark" ? "light" : "dark"} mode`);
-  }
-
-  themeBtn.addEventListener("click", () => {
-    const next = root.dataset.theme === "dark" ? "light" : "dark";
-    setTheme(next);
-    try { localStorage.setItem("theme", next); } catch (_) { /* Storage can be disabled. */ }
-  });
-
-  function syncSliders() {
-    rate = Number(rateInput.value);
-    $("speedValue").textContent = `${energy.toFixed(1)} MeV`;
-    $("rateValue").textContent = `${rate} α/s`;
-  }
-
-  speedInput.addEventListener("input", () => {
-    const nextEnergy = Number(speedInput.value);
-    if (nextEnergy !== energy) {
-      energy = nextEnergy;
-      speedFactor = Math.sqrt(energy / E_REF_MEV);
-      resetStats();
-      particles = [];
-      flashes = [];
-      spawnTimer = 0;
-      rebuildTheoryPaths();
-    }
-    syncSliders();
-  });
-  rateInput.addEventListener("input", syncSliders);
-  showTheory.addEventListener("change", () => { showTheory.setAttribute("aria-checked", String(showTheory.checked)); });
-
-  pauseBtn.addEventListener("click", () => {
-    paused = !paused;
-    const label = pauseBtn.querySelector("span:last-child");
-    const glyph = pauseBtn.querySelector(".pause-glyph");
-    label.textContent = paused ? "Resume" : "Pause";
-    glyph.textContent = paused ? "▶" : "Ⅱ";
-    runState.textContent = paused ? "PAUSED" : "LIVE";
-  });
-
-  resetBtn.addEventListener("click", () => {
-    resetStats();
-    particles = [];
-    flashes = [];
-    spawnTimer = 0;
-  });
-
-  // ---------- Animation loop ----------
-  resetStats();
-  syncSliders();
-  setTheme(root.dataset.theme === "dark" ? "dark" : "light");
-  resize();
-
-  let last = performance.now();
-  function frame(now) {
-    const dt = Math.min((now - last) / 1000, 0.05);
-    last = now;
-    if (!paused) {
-      spawnTimer += dt;
-      const interval = 1 / Math.max(1, rate);
-      while (spawnTimer >= interval) {
-        spawnTimer -= interval;
-        spawn();
-      }
-      step(dt);
-    }
-    draw();
-    drawHist();
-    updateReadouts();
-    requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
-})();
-
 // ---------- Radioactive decay teaching lab ----------
 (() => {
   "use strict";
 
   const $ = (id) => document.getElementById(id);
+  const physics = window.DecayPhysics;
+  const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
   const elementData = [
     ["H","Hydrogen"],["He","Helium"],["Li","Lithium"],["Be","Beryllium"],["B","Boron"],["C","Carbon"],["N","Nitrogen"],["O","Oxygen"],["F","Fluorine"],["Ne","Neon"],
     ["Na","Sodium"],["Mg","Magnesium"],["Al","Aluminium"],["Si","Silicon"],["P","Phosphorus"],["S","Sulfur"],["Cl","Chlorine"],["Ar","Argon"],["K","Potassium"],["Ca","Calcium"],
@@ -601,10 +41,27 @@
   let eventLast = 0, loopTimeout = null, eventCount = 0, randomRemaining = 0;
   let currentFrame = 0, lastDecaySize = "", lastClockSize = "", lastCloudSize = "";
   let decayTimes = [], cloudParticles = [], clockPlaying = false, lastMapComposition = null;
+  let currentEvent = null, elapsed = Number($("elapsedSlider").value), dirty = true, lastReadoutTime = 0;
+  const eventCamera = { yaw: -.35, pitch: .25 }, cloudCamera = { yaw: -.45, pitch: .3 };
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  if (reducedMotion.matches) $("cloudRotate").checked = false;
+  const canEmit = () => daughterValid() && Number(estimateQ()) > 0;
+  const unit = v => { const length = physics.norm(v); return length > 0 ? physics.scale(v, 1 / length) : [0, 0, 0]; };
+  const eventOptions = () => ({ mode, q: estimateQ(), a: daughter().a, z: daughter().z,
+    share: $("betaSampling").value === "manual" ? Number($("betaShare").value) / 100 : null });
+  function seedRandom(seed) { return () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; }; }
+  function prepareEvent() { currentEvent = canEmit() ? physics.event(eventOptions()) : null; updateEnergyPartition(); dirty = true; }
+  function refreshCloudEvents() {
+    for (const particle of cloudParticles) particle.event = canEmit() ? physics.event({ ...eventOptions(), share: null, rng: seedRandom(particle.seed) }) : null;
+  }
 
   const elementSymbol = (z) => elementData[Math.max(0, Math.min(elementData.length - 1, z - 1))][0];
   const elementName = (z) => elementData[Math.max(0, Math.min(elementData.length - 1, z - 1))][1];
-  const parent = () => ({ z: Number(zInput.value), n: Number(nInput.value), a: Number(zInput.value) + Number(nInput.value) });
+  const parent = () => {
+    const z = Math.max(1, Math.min(118, Math.round(Number(zInput.value) || 1)));
+    const n = Math.max(0, Math.min(220, Math.round(Number(nInput.value) || 0)));
+    return { z, n, a: z + n };
+  };
   const daughter = (m = mode) => {
     const p = parent(), spec = modes[m];
     return { z: p.z + spec.dz, n: p.n + spec.dn, a: p.a + spec.dz + spec.dn };
@@ -626,7 +83,7 @@
       button.tabIndex = selected ? 0 : -1;
     });
     $("gammaEnergyControl").hidden = mode !== "gamma";
-    if (keepComposition) populatePresets(true);
+    if (keepComposition) populatePresets($("keepNucleus").checked);
     clearEvent();
     updateDecayReadouts();
   }
@@ -688,7 +145,7 @@
   function estimateQ(m = mode) {
     if (m === "gamma") return Number($("gammaEnergy").value) / 1000;
     const p = parent(), d = daughter(m);
-    if (d.z < 1 || d.n < 0) return null;
+    if (d.z < 1 || d.z > 118 || d.n < 0) return null;
     const preset = (presets[m] || []).find((item) => item.value === presetSelect.value && item.z === p.z && item.n === p.n);
     if (preset && Number.isFinite(preset.q)) return preset.q;
     const deltaB = bindingEnergy(d.a, d.z) - bindingEnergy(p.a, p.z);
@@ -730,7 +187,7 @@
       status.className = `energy-status ${possible ? "is-possible" : "is-forbidden"}`;
       status.innerHTML = `<span class="energy-status-dot"></span><strong>${mode === "gamma" ? "USER-SET TRANSITION" : knownPreset ? "EVALUATED Q > 0" : possible ? "Q > 0 · ENERGETICALLY ALLOWED IN MODEL" : "Q < 0 · NOT ALLOWED IN MODEL"}</strong>`;
       explanation.textContent = mode === "gamma"
-        ? "The photon carries the chosen excitation energy; Z, N, and A stay the same. Internal conversion is not shown."
+        ? "The chosen photon energy also implies a small recoil energy. Their sum is the level-energy difference; Z, N, and A stay the same."
         : knownPreset ? "This worked example uses an evaluated transition Q value. Positive Q permits the transition, but does not give the half-life or branching ratio."
           : possible ? "This approximate model leaves energy available. A positive Q is necessary, but does not give the half-life or branching ratio."
           : "This approximate model gives a negative Q, so this ground-state transition would need energy input.";
@@ -740,39 +197,68 @@
       : knownGamma
       ? `The Tc-99m preset uses the evaluated 140.511 keV gamma line. <a href="https://www.nndc.bnl.gov/nudat3/getdecaydataset.jsp?dsid=99tc+it+decay+%286.0072+h%29&amp;nucleus=99TC" target="_blank" rel="noreferrer">View NNDC ENSDF record</a>. Moving the slider chooses an illustrative transition energy.`
       : mode === "gamma"
-      ? "This is the slider's chosen level difference, not a lookup of measured gamma lines. Ground-state alpha and beta estimates use a liquid-drop binding-energy formula; shell structure and measured isotope masses can change the result."
+      ? "This is the chosen photon energy; the level gap is slightly larger because the nucleus recoils. Ground-state alpha and beta estimates use a liquid-drop binding-energy formula; shell structure and measured isotope masses can change the result."
       : mode === "betaPlus"
         ? "The estimate uses a liquid-drop binding-energy formula and includes the 2-electron-mass threshold for positron emission. Electron capture can still be energetically possible when β+ is not. Shell structure, measured isotope masses, daughter excitation, and transition selection rules are not included."
         : "The estimate uses a liquid-drop binding-energy formula and standard nucleon/electron mass differences. It is most limited for light nuclei and close to thresholds; it does not include measured atomic masses, daughter excitation, or transition selection rules.";
     const caption = mode === "alpha" ? "A compact ⁴He nucleus carries away 2 protons and 2 neutrons." : mode === "betaMinus" ? "A neutron becomes a proton; an electron and electron antineutrino leave." : mode === "betaPlus" ? "A proton becomes a neutron; a positron and electron neutrino leave." : "The excited nucleus loses energy as a photon; Z, N, and A stay the same.";
     $("decayCanvasTag").textContent = `${p.a}${mode === "gamma" ? (isTc99mPreset ? "m" : "*") : ""}${sym.toUpperCase()} · ${mode.toUpperCase()}`;
-    updateEnergyPartition(q);
-    if (!eventRunning && !eventComplete) $("decayEventCaption").textContent = caption;
+    prepareEvent();
+    refreshCloudEvents();
+    $("decayPlay").disabled = !canEmit();
+    $("decayStep").disabled = !canEmit();
+    $("clockPlay").disabled = !canEmit();
+    if (!canEmit()) setClockPlaying(false);
+    if (!canEmit()) $("decayEventCaption").textContent = "No outgoing event: choose a valid nucleus with positive Q in this model.";
+    if (!eventRunning && !eventComplete && canEmit()) $("decayEventCaption").textContent = caption;
+    updateHalfLifeReadouts();
     renderNuclideMap(); drawDecayCanvas(); drawDecayCloud();
   }
 
-  function updateEnergyPartition(q = estimateQ()) {
+  function updateEnergyPartition() {
     const isBeta = mode === "betaMinus" || mode === "betaPlus";
     $("betaEnergyControl").hidden = !isBeta;
-    const share = Number($("betaShare").value) / 100;
-    $("betaShareValue").textContent = `${Math.round(share * 100)}%`;
-    if (q === null || q <= 0) {
-      $("energyPartitionResult").textContent = q === null ? "No valid daughter nucleus for this transition." : "No outgoing kinetic-energy budget: the selected ground-state transition has Q ≤ 0 in this model.";
-      $("energyPartitionNote").textContent = "This is an energy-accounting aid, not a decay-rate prediction.";
-    } else if (mode === "alpha") {
-      const p = parent(), d = daughter();
-      const alphaK = q * d.a / p.a, recoil = q * 4 / p.a;
-      $("energyPartitionResult").textContent = `Alpha kinetic energy ≈ ${(alphaK * 1000).toFixed(1)} keV · daughter recoil ≈ ${(recoil * 1000).toFixed(1)} keV.`;
-      $("energyPartitionNote").textContent = "Two-body recoil split estimated from daughter and alpha mass numbers; electron shake-off is omitted.";
-    } else if (isBeta) {
-      const betaK = q * share, neutrino = q - betaK, particle = mode === "betaMinus" ? "electron" : "positron", nu = mode === "betaMinus" ? "antineutrino" : "neutrino";
-      $("energyPartitionResult").textContent = `${particle}: ${(betaK * 1000).toFixed(1)} keV · ${nu}: ${(neutrino * 1000).toFixed(1)} keV.`;
-      $("energyPartitionNote").textContent = "Move the slider to explore possible energy shares. Real beta spectra are continuous and not uniformly probable; recoil is omitted.";
-    } else {
-      const recoilKeV = (q * q / (2 * Math.max(1, parent().a) * 931.5)) * 1000;
-      $("energyPartitionResult").textContent = `Photon: ${(q * 1000).toFixed(1)} keV · nucleus recoil ≈ ${recoilKeV.toFixed(4)} keV.`;
-      $("energyPartitionNote").textContent = "The photon energy is set by the chosen level gap; recoil is calculated for a stationary parent.";
+    $("betaShare").disabled = $("betaSampling").value !== "manual";
+    const e = currentEvent;
+    $("eventSpeed").textContent = "";
+    if (!e) {
+      $("energyPartitionResult").textContent = "No outgoing kinetic-energy budget for this composition and mode.";
+      $("energyPartitionNote").textContent = "The liquid-drop estimate is approximate. A negative model Q is not proof that every real transition is forbidden.";
+      if (isBeta) drawBetaSpectrum();
+      return;
     }
+    const energyText = value => value < .001 ? `${(value * 1e6).toPrecision(3)} eV` : `${(value * 1000).toFixed(2)} keV`;
+    const names = { alpha: "Alpha", betaMinus: "Electron", betaPlus: "Positron", neutrino: mode === "betaMinus" ? "Antineutrino" : "Neutrino", gamma: "Photon" };
+    $("energyPartitionResult").textContent = [...e.products.map(p => `${names[p.kind]}: ${energyText(p.energy)}`), `Daughter recoil: ${energyText(e.recoil.energy)}`].join(" · ");
+    const first = e.products[0];
+    $("eventSpeed").textContent = `${names[first.kind]} speed: ${(first.speed * 100).toFixed(2)}% c · recoil: ${(e.recoil.speed * 299792458).toPrecision(3)} m/s`;
+    $("energyPartitionNote").textContent = isBeta
+      ? "Energy and all three momentum components balance. Energies follow an approximate allowed spectrum; beta–neutrino angular correlations are omitted. Manual mode explores possible energy shares."
+      : mode === "alpha" ? "Equal and opposite momenta. Relativistic two-body energy split, with the daughter mass approximated by A × u."
+      : `Photon energy + recoil = ${energyText(e.q)} level gap. The recoil displacement is enlarged in the animation.`;
+    if (isBeta) {
+      const end = physics.endpoint(e.q, e.recoil.mass);
+      $("betaShareValue").textContent = `${(100 * first.energy / end).toFixed(1)}%`;
+      drawBetaSpectrum();
+    }
+  }
+
+  function drawBetaSpectrum() {
+    const canvas = $("betaSpectrum"), c = canvas.getContext("2d");
+    const { w, h } = fitCanvas(canvas, c);
+    if (!w || !h) return;
+    c.clearRect(0, 0, w, h);
+    if (!currentEvent || !mode.startsWith("beta")) return;
+    const spec = physics.spectrum(currentEvent.q, currentEvent.recoil.mass, daughter().z, mode === "betaPlus");
+    const peak = Math.max(...spec.weights), left = 8, bottom = h - 21, plotW = w - 20, plotH = h - 31;
+    c.beginPath(); c.moveTo(left, bottom);
+    spec.weights.forEach((weight, i) => c.lineTo(left + plotW * i / 512, bottom - plotH * weight / peak));
+    c.lineTo(left + plotW, bottom); c.closePath(); c.fillStyle = "rgba(123,174,227,.17)"; c.fill();
+    c.strokeStyle = modes[mode].color; c.lineWidth = 1.5; c.stroke();
+    const x = left + plotW * currentEvent.products[0].energy / spec.end;
+    c.strokeStyle = "#dfa820"; c.beginPath(); c.moveTo(x, 5); c.lineTo(x, bottom); c.stroke();
+    c.font = `9px ${MONO}`; c.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
+    c.textAlign = "left"; c.fillText("0", left, h - 5); c.textAlign = "right"; c.fillText(`${(spec.end * 1000).toFixed(1)} keV`, w - 4, h - 5);
   }
 
   function mapCoordinates(n, z, minN, minZ, cw, ch, left, top, maxZ) {
@@ -831,115 +317,156 @@
   }
 
   function clearEvent() {
-    eventRunning = false; eventComplete = false; eventProgress = 0; eventCount = 0;
+    eventRunning = false; eventComplete = false; eventProgress = 0; currentEvent = null;
     if (loopTimeout) clearTimeout(loopTimeout);
-    loopTimeout = null;
+    loopTimeout = null; dirty = true;
     $("decayRunState").textContent = "READY";
     $("decayPlay").querySelector("span").textContent = "Animate decay";
     $("decayPlay").firstChild.textContent = "▶ ";
   }
-
   function finishEvent() {
     eventRunning = false; eventComplete = true; eventProgress = 1; eventCount++;
     $("decayRunState").textContent = "EVENT SHOWN";
-    $("decayPlay").querySelector("span").textContent = "Replay decay";
+    $("decayPlay").querySelector("span").textContent = "New decay";
     $("decayPlay").firstChild.textContent = "▶ ";
-    const q = estimateQ();
-    const caveat = mode !== "gamma" && q !== null && q <= 0 ? " (shown as a conservation diagram; the model Q is negative)" : "";
-    $("decayEventCaption").textContent = `${modes[mode].label} event complete${caveat}. The parent-to-daughter bookkeeping is shown in the ledger.`;
-    if ($("decayAuto").checked) loopTimeout = setTimeout(() => { eventProgress = 0; eventComplete = false; eventRunning = true; eventLast = performance.now(); $("decayRunState").textContent = "ANIMATING"; }, 800);
+    $("decayEventCaption").textContent = "One event, balanced in 3D. Drag to inspect its directions; New decay samples another event.";
+    if ($("decayAuto").checked) loopTimeout = setTimeout(() => { clearEvent(); prepareEvent(); startEvent(); }, 900);
   }
-
   function startEvent() {
-    if (!daughterValid()) {
-      $("decayEventCaption").textContent = mode === "alpha" ? "This parent needs at least two protons and two neutrons to emit an alpha particle." : "The selected daughter would have an invalid proton or neutron count.";
-      return;
-    }
+    if (!canEmit()) return;
     if (loopTimeout) { clearTimeout(loopTimeout); loopTimeout = null; }
-    if (eventComplete || eventProgress >= 1) eventProgress = 0;
-    eventRunning = !eventRunning;
-    eventLast = performance.now();
+    if (eventComplete || eventProgress >= 1) { eventProgress = 0; eventComplete = false; prepareEvent(); }
+    if (!currentEvent) prepareEvent();
+    eventRunning = !eventRunning; eventLast = performance.now(); dirty = true;
     $("decayRunState").textContent = eventRunning ? "ANIMATING" : "PAUSED";
     $("decayPlay").querySelector("span").textContent = eventRunning ? "Pause animation" : "Continue animation";
     $("decayPlay").firstChild.textContent = eventRunning ? "Ⅱ " : "▶ ";
-    if (eventRunning) $("decayEventCaption").textContent = `Showing ${modes[mode].name} composition and emitted particles…`;
+    $("decayEventCaption").textContent = "Random 3D emission directions. Recoil balances the outgoing momentum. Distances and times are enlarged.";
   }
-
   function stepEvent() {
-    if (!daughterValid()) {
-      $("decayEventCaption").textContent = mode === "alpha" ? "This parent needs at least two protons and two neutrons to emit an alpha particle." : "The selected daughter would have an invalid proton or neutron count.";
-      return;
-    }
+    if (!canEmit()) return;
     if (loopTimeout) { clearTimeout(loopTimeout); loopTimeout = null; }
     eventRunning = false;
-    eventProgress = eventComplete ? 0 : eventProgress;
-    eventComplete = false;
-    eventProgress = Math.min(1, eventProgress + 0.25);
-    $("decayRunState").textContent = eventProgress >= 1 ? "EVENT SHOWN" : `STEP ${Math.round(eventProgress * 4)}/4`;
-    $("decayEventCaption").textContent = `Step ${Math.round(eventProgress * 4)} of 4: follow the nucleus and emitted particle(s).`;
-    if (eventProgress >= 1) { eventComplete = true; eventCount++; }
-    $("decayPlay").querySelector("span").textContent = eventComplete ? "Replay decay" : "Animate decay";
+    if (eventComplete) { eventProgress = 0; eventComplete = false; prepareEvent(); }
+    if (!currentEvent) prepareEvent();
+    eventProgress = Math.min(1, eventProgress + .25); dirty = true;
+    $("decayRunState").textContent = `STEP ${Math.round(eventProgress * 4)}/4`;
+    $("decayEventCaption").textContent = "Step through the same event. Drag the chamber to inspect the recoil direction.";
+    $("decayPlay").querySelector("span").textContent = "Continue animation";
     $("decayPlay").firstChild.textContent = "▶ ";
+    if (eventProgress >= 1) finishEvent();
   }
 
-  function drawNucleons(x, y, z, n, alpha = 1, scale = 1) {
-    const total = Math.max(1, z + n), count = Math.min(74, total), protonDots = Math.round(count * z / total);
-    const radius = (18 + Math.min(38, Math.sqrt(total) * 2.3)) * scale;
-    decayCtx.save(); decayCtx.globalAlpha = alpha;
-    const golden = Math.PI * (3 - Math.sqrt(5));
+  function fitCanvas(canvas, context) {
+    const rect = canvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
+    const width = Math.round(rect.width * dpr), height = Math.round(rect.height * dpr);
+    if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w: rect.width, h: rect.height };
+  }
+  function project(v, camera, w, h, scale = .35) {
+    const cy = Math.cos(camera.yaw), sy = Math.sin(camera.yaw), cp = Math.cos(camera.pitch), sp = Math.sin(camera.pitch);
+    const x = v[0] * cy + v[2] * sy, z = -v[0] * sy + v[2] * cy;
+    const y = v[1] * cp - z * sp, depth = v[1] * sp + z * cp, perspective = 4 / (4 - depth);
+    return { x: w / 2 + x * Math.min(w, h) * scale * perspective, y: h / 2 - y * Math.min(w, h) * scale * perspective, z: depth, size: perspective };
+  }
+  function chamberBackground(c, camera, w, h) {
+    const bg = c.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * .7);
+    bg.addColorStop(0, "#1b3027"); bg.addColorStop(1, "#07110f");
+    c.fillStyle = bg; c.fillRect(0, 0, w, h);
+    for (let axis = 0; axis < 3; axis++) {
+      c.beginPath();
+      for (let i = 0; i <= 96; i++) {
+        const angle = i * Math.PI / 48, v = [0, 0, 0];
+        v[(axis + 1) % 3] = 1.12 * Math.cos(angle); v[(axis + 2) % 3] = 1.12 * Math.sin(angle);
+        const p = project(v, camera, w, h);
+        if (!i) c.moveTo(p.x, p.y); else c.lineTo(p.x, p.y);
+      }
+      c.strokeStyle = "rgba(167,207,183,.18)"; c.lineWidth = .8; c.stroke();
+      const v = [0, 0, 0]; v[axis] = 1.22;
+      const p = project(v, camera, w, h); c.font = `9px ${MONO}`; c.fillStyle = "#8da797"; c.fillText(["X", "Y", "Z"][axis], p.x, p.y);
+    }
+  }
+  function bead(c, p, radius, color) {
+    const r = Math.max(.7, radius * p.size);
+    c.save(); c.globalAlpha *= Math.min(1, Math.max(.35, .75 + .18 * p.z));
+    const shine = c.createRadialGradient(p.x - r * .3, p.y - r * .35, r * .05, p.x, p.y, r);
+    shine.addColorStop(0, "#fff8df"); shine.addColorStop(.32, color); shine.addColorStop(1, "#14231d");
+    c.fillStyle = shine; c.beginPath(); c.arc(p.x, p.y, r, 0, 2 * Math.PI); c.fill(); c.restore();
+  }
+  function drawNucleus3D(c, position, nucleus, camera, w, h) {
+    const count = Math.min(96, nucleus.a), r = .12 + .024 * Math.cbrt(nucleus.a), points = [];
+    const random = seedRandom(408);
     for (let i = 0; i < count; i++) {
-      const r = radius * Math.sqrt((i + .45) / count), a = i * golden;
-      const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
-      decayCtx.beginPath(); decayCtx.arc(px, py, Math.max(2.1, 4.1 - count / 35), 0, Math.PI * 2);
-      decayCtx.fillStyle = i < protonDots ? "#f0b746" : "#86bda0"; decayCtx.fill();
-      decayCtx.strokeStyle = "rgba(4,12,10,.7)"; decayCtx.lineWidth = 1; decayCtx.stroke();
+      const v = physics.scale(physics.direction(random), r * Math.cbrt(random()));
+      // Intermix representative proton and neutron dots rather than segregating them.
+      const proton = ((i * .61803398875) % 1) < nucleus.z / nucleus.a;
+      points.push({ ...project(physics.add(position, v), camera, w, h), color: proton ? "#efb74d" : "#89bca0" });
     }
-    decayCtx.restore();
-    return radius;
+    points.sort((a, b) => a.z - b.z).forEach(p => bead(c, p, Math.max(2.5, 5.5 - count / 32), p.color));
+    return r;
   }
-
-  function drawDecayCanvas(now = performance.now()) {
-    const rect = decayCanvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
-    if (!rect.width || !rect.height) return;
-    const dim = `${Math.round(rect.width * dpr)}x${Math.round(rect.height * dpr)}`;
-    if (dim !== lastDecaySize) { lastDecaySize = dim; decayCanvas.width = Math.round(rect.width * dpr); decayCanvas.height = Math.round(rect.height * dpr); decayCtx.setTransform(dpr, 0, 0, dpr, 0, 0); }
-    const w = rect.width, h = rect.height, p = parent(), d = daughter(), progress = eventProgress;
-    const bg = decayCtx.createLinearGradient(0, 0, w, h); bg.addColorStop(0, "#0c1714"); bg.addColorStop(1, "#17231e");
-    decayCtx.fillStyle = bg; decayCtx.fillRect(0, 0, w, h);
-    decayCtx.strokeStyle = "rgba(157,190,167,.09)"; decayCtx.lineWidth = 1;
-    for (let x = 25; x < w; x += 42) { decayCtx.beginPath(); decayCtx.moveTo(x, 0); decayCtx.lineTo(x, h); decayCtx.stroke(); }
-    for (let y = 24; y < h; y += 42) { decayCtx.beginPath(); decayCtx.moveTo(0, y); decayCtx.lineTo(w, y); decayCtx.stroke(); }
-    const cx = w * .40, cy = h * .51, daughterIsShown = eventComplete || progress > .44;
-    const current = daughterIsShown && daughterValid() ? d : p;
-    decayCtx.save(); decayCtx.setLineDash([4, 6]); decayCtx.strokeStyle = "rgba(207,224,211,.24)"; decayCtx.beginPath(); decayCtx.moveTo(cx, 20); decayCtx.lineTo(cx, h - 34); decayCtx.stroke(); decayCtx.restore();
-    const radius = drawNucleons(cx, cy, current.z, current.n, 1, 1);
-    decayCtx.textAlign = "center"; decayCtx.font = "600 11px var(--mono)"; decayCtx.fillStyle = "#f0e8cf";
-    const isTc99mPreset = mode === "gamma" && presetSelect.value === "tc99m" && p.z === 43 && p.n === 56;
-    decayCtx.fillText(`${current.a}${mode === "gamma" && !daughterIsShown ? (isTc99mPreset ? "m" : "*") : ""}${elementSymbol(current.z)} · ${current.z}p ${current.n}n`, cx, cy + radius + 23);
-    decayCtx.font = "9px var(--mono)"; decayCtx.fillStyle = "rgba(219,229,215,.55)"; decayCtx.fillText(daughterIsShown ? "DAUGHTER / LOWER LEVEL" : "PARENT NUCLEUS", cx, 20);
-    const travel = Math.min(1, Math.max(0, progress));
-    if (travel > 0 && mode === "alpha") {
-      const px = cx + radius + 18 + travel * Math.max(35, w * .37), py = cy + Math.sin(travel * 2.3) * 16;
-      decayCtx.strokeStyle = "rgba(240,183,70,.5)"; decayCtx.lineWidth = 2; decayCtx.beginPath(); decayCtx.moveTo(cx + radius, cy); decayCtx.lineTo(px - 6, py); decayCtx.stroke();
-      decayCtx.fillStyle = "#f4ca6c";
-      [[-5,-5],[5,-5],[-5,5],[5,5]].forEach(([dx,dy], i) => { decayCtx.beginPath(); decayCtx.arc(px + dx, py + dy, 4.1, 0, Math.PI*2); decayCtx.fillStyle = i % 2 ? "#8fbea0" : "#f0b746"; decayCtx.fill(); });
-      decayCtx.fillStyle = "#f6ebcf"; decayCtx.font = "10px var(--mono)"; decayCtx.fillText("⁴He · 2p + 2n", Math.min(w - 76, px), py + 28);
-    } else if (travel > 0 && (mode === "betaMinus" || mode === "betaPlus")) {
-      const sign = mode === "betaMinus" ? "e⁻" : "e⁺", nu = mode === "betaMinus" ? "ν̄ₑ" : "νₑ";
-      const px = cx + radius + 18 + travel * Math.max(35, w * .35), py = cy - travel * 48;
-      const nx = cx + radius + 12 + travel * Math.max(30, w * .23), ny = cy + travel * 58;
-      decayCtx.strokeStyle = mode === "betaMinus" ? "rgba(123,174,227,.65)" : "rgba(209,132,173,.65)";
-      decayCtx.lineWidth = 2; decayCtx.beginPath(); decayCtx.moveTo(cx + radius, cy); decayCtx.lineTo(px, py); decayCtx.moveTo(cx + radius, cy); decayCtx.lineTo(nx, ny); decayCtx.stroke();
-      decayCtx.beginPath(); decayCtx.arc(px, py, 6, 0, Math.PI * 2); decayCtx.fillStyle = mode === "betaMinus" ? "#7baee3" : "#d184ad"; decayCtx.fill();
-      decayCtx.fillStyle = "#f6ebcf"; decayCtx.font = "10px var(--mono)"; decayCtx.textAlign = "left"; decayCtx.fillText(sign, px + 10, py + 3); decayCtx.fillText(nu, nx + 9, ny + 3);
-      decayCtx.beginPath(); decayCtx.arc(nx, ny, 3, 0, Math.PI * 2); decayCtx.fillStyle = "#d9e5cc"; decayCtx.fill();
-    } else if (travel > 0 && mode === "gamma") {
-      const endX = cx + radius + 22 + travel * Math.max(45, w * .42), startX = cx + radius + 14;
-      decayCtx.strokeStyle = "#79ad83"; decayCtx.lineWidth = 2.2; decayCtx.beginPath();
-      for (let x = startX; x <= endX; x += 2) { const y = cy + Math.sin((x - startX) / 13) * 8; if (x === startX) decayCtx.moveTo(x, y); else decayCtx.lineTo(x, y); }
-      decayCtx.stroke(); decayCtx.fillStyle = "#b9dbb9"; decayCtx.font = "10px var(--mono)"; decayCtx.textAlign = "left"; decayCtx.fillText(`${Number($("gammaEnergy").value).toFixed(1)} keV γ`, Math.min(w - 115, endX + 8), cy - 13);
+  function line3D(c, start, end, camera, w, h, color, dashed = false, opacity = .7) {
+    const a = project(start, camera, w, h), b = project(end, camera, w, h);
+    c.save(); c.globalAlpha = opacity; c.strokeStyle = color; c.lineWidth = dashed ? 1 : 1.6;
+    c.setLineDash(dashed ? [3, 5] : []); c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke(); c.restore();
+  }
+  function drawDecayCanvas() {
+    const { w, h } = fitCanvas(decayCanvas, decayCtx);
+    if (!w || !h) return;
+    const c = decayCtx, e = currentEvent, travel = Math.max(0, (eventProgress - .16) / .84), emitted = travel > 0 && e;
+    chamberBackground(c, eventCamera, w, h);
+    const recoilPosition = emitted ? physics.scale(unit(e.recoil.momentum), travel * .23) : [0, 0, 0];
+    const nucleus = emitted ? daughter() : parent(), nucleusPoint = project(recoilPosition, eventCamera, w, h);
+    const items = [];
+    if (emitted) {
+      line3D(c, [0, 0, 0], recoilPosition, eventCamera, w, h, "#91bd9b", true);
+      for (const product of e.products) {
+        const relativeSpeed = product.kind === "alpha" ? 1 : .45 + .55 * Math.sqrt(product.speed);
+        const position = physics.scale(unit(product.momentum), travel * 1.2 * relativeSpeed);
+        line3D(c, [0, 0, 0], position, eventCamera, w, h, product.kind === "neutrino" ? "#d8e5ce" : modes[mode].color, product.kind === "neutrino");
+        items.push({ product, position, point: project(position, eventCamera, w, h) });
+      }
     }
-    decayCtx.textAlign = "left"; decayCtx.fillStyle = "rgba(219,229,215,.58)"; decayCtx.font = "9px var(--mono)"; decayCtx.fillText("SCHEMATIC NUCLEONS · NOT TO SCALE", 12, h - 12);
+    const drawProduct = item => {
+      const { product, position, point } = item;
+      const color = product.kind === "neutrino" ? "#d8e5ce" : modes[mode].color;
+      if (product.kind === "alpha") {
+        [[-.025,-.025,0],[.025,-.025,0],[-.025,.025,0],[.025,.025,0]].forEach((v, i) => bead(c, project(physics.add(position, v), eventCamera, w, h), 4, i % 2 ? "#89bca0" : "#efb74d"));
+      } else bead(c, point, product.kind === "neutrino" ? 3 : 5, color);
+      const label = { alpha: "α · ⁴He", betaMinus: "e⁻", betaPlus: "e⁺", neutrino: mode === "betaMinus" ? "ν̄ₑ" : "νₑ", gamma: "γ" }[product.kind];
+      c.font = `600 12px ${MONO}`; c.textAlign = "center"; c.fillStyle = "#f3ecd8";
+      c.fillText(label, Math.max(30, Math.min(w - 30, point.x)), Math.max(40, Math.min(h - 40, point.y - 13)));
+    };
+    items.filter(item => item.point.z < nucleusPoint.z).forEach(drawProduct);
+    const radius = drawNucleus3D(c, recoilPosition, nucleus, eventCamera, w, h);
+    items.filter(item => item.point.z >= nucleusPoint.z).forEach(drawProduct);
+    c.textAlign = "center"; c.fillStyle = "#f2e7ca"; c.font = `600 11px ${MONO}`;
+    c.fillText(`${nucleus.a}${mode === "gamma" && !emitted ? "*" : ""}${elementSymbol(nucleus.z)} · ${nucleus.z}p ${nucleus.n}n`, nucleusPoint.x, nucleusPoint.y + Math.min(w,h) * .35 * radius + 22);
+    c.font = `9px ${MONO}`; c.fillStyle = "#b0c7b6";
+    c.fillText(emitted ? "DAUGHTER RECOIL · DISPLACEMENT ENLARGED" : "PARENT AT REST · 3D VIEW", w / 2, 27);
+    c.fillStyle = "#90a697"; c.fillText("SCHEMATIC SIZES, DISTANCES & FLIGHT TIMES", w / 2, h - 13);
+    if (!canEmit()) { c.fillStyle = "#e5b885"; c.fillText("NO POSITIVE-Q EVENT IN THIS MODEL", w / 2, h - 32); }
+  }
+  function bindOrbit(canvas, camera, resetId) {
+    let drag = null;
+    canvas.addEventListener("pointerdown", e => { if (e.button !== 0) return; drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); canvas.focus({ preventScroll: true }); });
+    canvas.addEventListener("pointermove", e => {
+      if (!drag) return;
+      camera.yaw += (e.clientX - drag[0]) * .009;
+      camera.pitch = Math.max(-1.45, Math.min(1.45, camera.pitch + (e.clientY - drag[1]) * .009));
+      drag = [e.clientX, e.clientY]; dirty = true;
+    });
+    for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) canvas.addEventListener(name, () => { drag = null; });
+    canvas.addEventListener("keydown", e => {
+      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home"].includes(e.key)) return;
+      e.preventDefault();
+      camera.yaw += e.key === "ArrowLeft" ? -.15 : e.key === "ArrowRight" ? .15 : 0;
+      camera.pitch = Math.max(-1.45, Math.min(1.45, camera.pitch + (e.key === "ArrowUp" ? .15 : e.key === "ArrowDown" ? -.15 : 0)));
+      if (e.key === "Home") { camera.yaw = -.35; camera.pitch = .25; }
+      dirty = true;
+    });
+    $(resetId).addEventListener("click", () => { camera.yaw = -.35; camera.pitch = .25; dirty = true; });
   }
 
   function formatNumber(value) {
@@ -958,110 +485,70 @@
 
   function rerollSample() {
     const n0 = Number($("sampleSlider").value);
-    decayTimes = Array.from({ length: n0 }, () => -Math.log(1 - Math.random()) / Math.LN2).sort((a, b) => a - b);
-    const shown = Math.min(n0, 150), chosen = new Set();
+    decayTimes = Array.from({ length: n0 }, () => physics.lifetime()).sort((a, b) => a - b);
+    const shown = Math.min(n0, 150), indices = Array.from({ length: n0 }, (_, i) => i);
     cloudParticles = [];
-    while (cloudParticles.length < shown) {
-      const index = Math.floor(Math.random() * n0);
-      if (chosen.has(index)) continue;
-      chosen.add(index);
-      const spotAngle = Math.random() * Math.PI * 2, spotRadius = Math.sqrt(Math.random()) * .86;
-      cloudParticles.push({
-        decayTime: decayTimes[index], spotAngle, spotRadius,
-        emissionAngle: Math.random() * Math.PI * 2,
-        neutrinoAngle: Math.random() * Math.PI * 2
-      });
+    // Partial Fisher–Yates: an unbiased representative sample, with no duplicate loop.
+    for (let i = 0; i < shown; i++) {
+      const j = i + Math.floor(Math.random() * (n0 - i));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+      cloudParticles.push({ decayTime: decayTimes[indices[i]], position: physics.scale(physics.direction(), .55 * Math.cbrt(Math.random())), seed: Math.floor(Math.random() * 4294967296) });
     }
+    refreshCloudEvents();
     $("cloudCountLabel").textContent = `${shown} of ${formatNumber(n0)} nuclei shown`;
-    randomRemaining = survivorsAt(Number($("elapsedSlider").value));
-    updateHalfLifeReadouts();
+    updateHalfLifeReadouts(); dirty = true;
   }
-
   function updateHalfLifeReadouts() {
-    const n0 = Number($("sampleSlider").value), halfLives = Number($("elapsedSlider").value), pSurvive = Math.pow(2, -halfLives);
-    const expected = n0 * pSurvive, value = Math.max(0.000001, Number($("halfLifeValue").value) || 1), unit = $("halfLifeUnit").value;
-    const time = value * halfLives, unitLabels = { s: "seconds", min: "minutes", h: "hours", d: "days", y: "years" };
-    $("elapsedValue").textContent = `${halfLives.toFixed(1)} T½`;
-    $("elapsedClock").textContent = `${halfLives.toFixed(1)} half-lives`;
+    const n0 = Number($("sampleSlider").value), pSurvive = 2 ** -elapsed;
+    const expected = n0 * pSurvive, inputValue = Number($("halfLifeValue").value), unit = $("halfLifeUnit").value;
+    const validTime = Number.isFinite(inputValue) && inputValue > 0;
+    $("halfLifeValue").setAttribute("aria-invalid", String(!validTime));
+    randomRemaining = survivorsAt(elapsed);
+    const unitLabels = { s: "seconds", min: "minutes", h: "hours", d: "days", y: "years" };
+    const seconds = { s: 1, min: 60, h: 3600, d: 86400, y: 365.25 * 86400 };
+    $("elapsedValue").textContent = `${elapsed.toFixed(2)} T½`;
+    $("elapsedClock").textContent = `${elapsed.toFixed(2)} half-lives`;
     $("sampleValue").textContent = formatNumber(n0);
     $("expectedRemaining").textContent = formatNumber(expected);
     $("sampleRemaining").textContent = formatNumber(randomRemaining);
     $("remainingFraction").textContent = `${(pSurvive * 100).toFixed(2)}%`;
-    $("elapsedReal").textContent = `${Number(time.toPrecision(3)).toLocaleString()} ${unitLabels[unit]}`;
-    drawHalfLifeChart(expected, randomRemaining, n0, halfLives);
-    drawDecayCloud();
+    $("elapsedReal").textContent = validTime ? `${Number((inputValue * elapsed).toPrecision(3)).toLocaleString()} ${unitLabels[unit]}` : "Enter a positive half-life";
+    const activity = validTime ? Math.LN2 * expected / (inputValue * seconds[unit]) : null;
+    $("activityValue").textContent = activity === null ? "—" : `${activity < .01 || activity >= 10000 ? activity.toExponential(2) : activity.toPrecision(3)} Bq`;
+    $("countSpread").textContent = `±${Math.sqrt(n0 * pSurvive * (1 - pSurvive)).toFixed(1)}`;
+    const preset = (presets[mode] || []).find(p => p.value === presetSelect.value);
+    $("halfLifeSource").textContent = preset && inputValue === preset.halfLife && unit === preset.halfLifeUnit ? "Preset parent half-life · decay branches not weighted" : "User-chosen half-life · not inferred from nuclear composition";
+    drawHalfLifeChart(expected, randomRemaining, n0, elapsed);
   }
-
   function drawDecayCloud() {
-    const rect = decayCloudCanvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
-    if (!rect.width || !rect.height) return;
-    const dim = `${Math.round(rect.width * dpr)}x${Math.round(rect.height * dpr)}`;
-    if (dim !== lastCloudSize) {
-      lastCloudSize = dim;
-      decayCloudCanvas.width = Math.round(rect.width * dpr);
-      decayCloudCanvas.height = Math.round(rect.height * dpr);
-      decayCloudCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    }
-    const w = rect.width, h = rect.height, elapsed = Number($("elapsedSlider").value);
-    const cx = w / 2, cy = h / 2, chamberRadius = Math.max(18, Math.min(w / 2 - 7, h / 2 - 7));
-    const colors = { alpha: "#f0b746", betaMinus: "#7baee3", betaPlus: "#d184ad", gamma: "#79ad83" };
-    const color = colors[mode], modeName = { alpha: "α particles", betaMinus: "electrons + antineutrinos", betaPlus: "positrons + neutrinos", gamma: "γ photons" }[mode];
-    const n0 = Number($("sampleSlider").value), decayed = n0 - randomRemaining;
-    const bg = decayCloudCtx.createLinearGradient(0, 0, w, h);
-    bg.addColorStop(0, "#13221b"); bg.addColorStop(1, "#0b1512");
-    decayCloudCtx.clearRect(0, 0, w, h); decayCloudCtx.fillStyle = bg; decayCloudCtx.fillRect(0, 0, w, h);
-    decayCloudCtx.save();
-    decayCloudCtx.beginPath(); decayCloudCtx.arc(cx, cy, chamberRadius, 0, Math.PI * 2); decayCloudCtx.clip();
-    decayCloudCtx.strokeStyle = "rgba(182,211,187,.10)"; decayCloudCtx.lineWidth = 1;
-    for (let ring = chamberRadius * .33; ring < chamberRadius; ring += chamberRadius * .33) {
-      decayCloudCtx.beginPath(); decayCloudCtx.arc(cx, cy, ring, 0, Math.PI * 2); decayCloudCtx.stroke();
-    }
-    decayCloudCtx.beginPath(); decayCloudCtx.moveTo(cx - chamberRadius, cy); decayCloudCtx.lineTo(cx + chamberRadius, cy); decayCloudCtx.moveTo(cx, cy - chamberRadius); decayCloudCtx.lineTo(cx, cy + chamberRadius); decayCloudCtx.stroke();
-    let visibleParents = 0, visibleDaughters = 0;
+    const { w, h } = fitCanvas(decayCloudCanvas, decayCloudCtx);
+    if (!w || !h) return;
+    const c = decayCloudCtx;
+    chamberBackground(c, cloudCamera, w, h);
+    const objects = []; let visibleParents = 0, visibleDaughters = 0;
     for (const particle of cloudParticles) {
-      const x = cx + Math.cos(particle.spotAngle) * particle.spotRadius * chamberRadius;
-      const y = cy + Math.sin(particle.spotAngle) * particle.spotRadius * chamberRadius;
-      const age = elapsed - particle.decayTime;
-      if (age < 0) {
+      const age = elapsed - particle.decayTime, e = particle.event;
+      if (age < 0 || !e) {
         visibleParents++;
-        decayCloudCtx.beginPath(); decayCloudCtx.arc(x, y, 2.1, 0, Math.PI * 2); decayCloudCtx.fillStyle = "#f2c75e"; decayCloudCtx.fill();
+        objects.push({ point: project(particle.position, cloudCamera, w, h), radius: 2.8, color: "#efb74d" });
         continue;
       }
       visibleDaughters++;
-      const rayLength = Math.min(chamberRadius * .38, 5 + age * chamberRadius * .18);
-      const ex = x + Math.cos(particle.emissionAngle) * rayLength, ey = y + Math.sin(particle.emissionAngle) * rayLength;
-      decayCloudCtx.save(); decayCloudCtx.globalAlpha = Math.max(.18, 1 - age / 4.2);
-      decayCloudCtx.strokeStyle = color; decayCloudCtx.lineWidth = 1.35;
-      decayCloudCtx.beginPath();
-      if (mode === "gamma") {
-        const px = -Math.sin(particle.emissionAngle), py = Math.cos(particle.emissionAngle);
-        const steps = 18;
-        for (let step = 0; step <= steps; step++) {
-          const t = step / steps, wave = Math.sin(t * Math.PI * 7) * 1.5;
-          const tx = x + Math.cos(particle.emissionAngle) * rayLength * t + px * wave;
-          const ty = y + Math.sin(particle.emissionAngle) * rayLength * t + py * wave;
-          if (step === 0) decayCloudCtx.moveTo(tx, ty); else decayCloudCtx.lineTo(tx, ty);
-        }
-      } else {
-        decayCloudCtx.moveTo(x, y); decayCloudCtx.lineTo(ex, ey);
+      const t = Math.min(1, age / .32), daughterPosition = physics.add(particle.position, physics.scale(unit(e.recoil.momentum), .06 * t));
+      objects.push({ point: project(daughterPosition, cloudCamera, w, h), radius: 2.5, color: "#8fbea0" });
+      if (age > .32) continue;
+      for (const product of e.products) {
+        const relativeSpeed = product.kind === "alpha" ? .6 : .5 + .5 * product.speed;
+        const distance = t * 1.1 * relativeSpeed;
+        const position = physics.add(particle.position, physics.scale(unit(product.momentum), distance));
+        const color = product.kind === "neutrino" ? "#d8e5ce" : modes[mode].color;
+        line3D(c, particle.position, position, cloudCamera, w, h, color, product.kind === "neutrino", .8 * (1 - t));
+        objects.push({ point: project(position, cloudCamera, w, h), radius: 1.8, color, opacity: 1 - t });
       }
-      decayCloudCtx.stroke();
-      if (mode === "betaMinus" || mode === "betaPlus") {
-        const nx = x + Math.cos(particle.neutrinoAngle) * rayLength * .72, ny = y + Math.sin(particle.neutrinoAngle) * rayLength * .72;
-        decayCloudCtx.setLineDash([2, 3]); decayCloudCtx.strokeStyle = "rgba(225,235,220,.66)"; decayCloudCtx.lineWidth = .85;
-        decayCloudCtx.beginPath(); decayCloudCtx.moveTo(x, y); decayCloudCtx.lineTo(nx, ny); decayCloudCtx.stroke(); decayCloudCtx.setLineDash([]);
-      }
-      decayCloudCtx.beginPath(); decayCloudCtx.arc(ex, ey, 1.65, 0, Math.PI * 2); decayCloudCtx.fillStyle = color; decayCloudCtx.fill();
-      decayCloudCtx.restore();
-      decayCloudCtx.beginPath(); decayCloudCtx.arc(x, y, 1.8, 0, Math.PI * 2); decayCloudCtx.fillStyle = "#8fbea0"; decayCloudCtx.fill();
     }
-    decayCloudCtx.restore();
-    decayCloudCtx.beginPath(); decayCloudCtx.arc(cx, cy, chamberRadius, 0, Math.PI * 2); decayCloudCtx.strokeStyle = "rgba(204,225,205,.55)"; decayCloudCtx.lineWidth = 1.1; decayCloudCtx.stroke();
-    decayCloudCtx.fillStyle = "rgba(228,238,220,.72)"; decayCloudCtx.font = "7px ui-monospace, monospace"; decayCloudCtx.textAlign = "left";
-    decayCloudCtx.fillText("PARENT", Math.max(5, cx - chamberRadius + 4), 10);
-    decayCloudCtx.textAlign = "right"; decayCloudCtx.fillText("DAUGHTER", Math.min(w - 5, cx + chamberRadius - 4), 10);
-    decayCloudCtx.textAlign = "left";
-    $("cloudReadout").textContent = `Shown: ${visibleParents} parents · ${visibleDaughters} decayed · ${modeName}`;
+    objects.sort((a,b) => a.point.z - b.point.z).forEach(o => { c.save(); c.globalAlpha = o.opacity ?? 1; bead(c, o.point, o.radius, o.color); c.restore(); });
+    const label = canEmit() ? `${visibleParents} parents · ${visibleDaughters} daughters shown` : "Choose a positive-Q transition to view emissions.";
+    if ($("cloudReadout").textContent !== label) $("cloudReadout").textContent = label;
   }
 
   function drawHalfLifeChart(expected, sampled, start, elapsed) {
@@ -1081,6 +568,25 @@
     for (let i = 0; i <= 6; i += 1) {
       const x = padL + plotW * i / 6; halfCtx.fillStyle = muted; halfCtx.fillText(String(i), x - 2, h - 8);
     }
+    const point = (t, n) => [padL + plotW * t / 6, padT + plotH * (1 - n / start)];
+    halfCtx.beginPath();
+    for (let i = 0; i <= 120; i++) {
+      const t = i / 20, prob = 2 ** -t, sd = Math.sqrt(start * prob * (1 - prob));
+      const [x, y] = point(t, Math.min(start, start * prob + sd));
+      if (!i) halfCtx.moveTo(x, y); else halfCtx.lineTo(x, y);
+    }
+    for (let i = 120; i >= 0; i--) {
+      const t = i / 20, prob = 2 ** -t, sd = Math.sqrt(start * prob * (1 - prob));
+      halfCtx.lineTo(...point(t, Math.max(0, start * prob - sd)));
+    }
+    halfCtx.closePath(); halfCtx.fillStyle = "rgba(123,174,227,.20)"; halfCtx.fill();
+    halfCtx.beginPath(); halfCtx.moveTo(...point(0, start));
+    let count = start;
+    for (const t of decayTimes) {
+      if (t > elapsed) break;
+      halfCtx.lineTo(...point(t, count)); halfCtx.lineTo(...point(t, --count));
+    }
+    halfCtx.lineTo(...point(elapsed, count)); halfCtx.strokeStyle = "#7baee3"; halfCtx.lineWidth = 1.3; halfCtx.stroke();
     halfCtx.strokeStyle = green; halfCtx.lineWidth = 2.3; halfCtx.beginPath();
     for (let i = 0; i <= 120; i++) {
       const t = 6 * i / 120, v = start * Math.pow(2, -t), x = padL + plotW * t / 6, y = padT + plotH * (1 - v / start);
@@ -1093,58 +599,69 @@
     halfCtx.fillStyle = muted; halfCtx.textAlign = "center"; halfCtx.fillText("ELAPSED HALF-LIVES · t/T½", padL + plotW / 2, h - 1); halfCtx.textAlign = "left";
   }
 
-  modeButtons.forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
+  modeButtons.forEach((button, i) => {
+    button.addEventListener("click", () => setMode(button.dataset.mode));
+    button.addEventListener("keydown", e => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+      e.preventDefault(); const j = e.key === "Home" ? 0 : e.key === "End" ? 3 : (i + (e.key === "ArrowRight" ? 1 : 3)) % 4;
+      modeButtons[j].focus(); setMode(modeButtons[j].dataset.mode);
+    });
+  });
   elementSelect.addEventListener("change", () => clampInputs("element"));
-  zInput.addEventListener("input", () => { if (zInput.value !== "") clampInputs("z"); });
   zInput.addEventListener("change", () => clampInputs("z"));
-  nInput.addEventListener("input", () => { if (nInput.value !== "") clampInputs("n"); });
   nInput.addEventListener("change", () => clampInputs("n"));
-  presetSelect.addEventListener("change", () => applyPreset(presetSelect.value));
-  $("gammaEnergy").addEventListener("input", updateDecayReadouts);
-  $("betaShare").addEventListener("input", () => updateEnergyPartition());
+  presetSelect.addEventListener("change", () => { clearEvent(); if (presetSelect.value === "custom") updateDecayReadouts(); else applyPreset(presetSelect.value); });
+  $("gammaEnergy").addEventListener("input", () => { clearEvent(); updateDecayReadouts(); });
+  for (const id of ["betaShare", "betaSampling"]) $(id).addEventListener("input", () => { clearEvent(); prepareEvent(); });
   $("decayPlay").addEventListener("click", startEvent);
   $("decayStep").addEventListener("click", stepEvent);
   $("decayReset").addEventListener("click", () => { clearEvent(); updateDecayReadouts(); });
   $("decayAuto").addEventListener("change", () => { if (!$("decayAuto").checked && loopTimeout) { clearTimeout(loopTimeout); loopTimeout = null; } });
-  $("decaySpeed").addEventListener("input", () => {});
-  $("elapsedSlider").addEventListener("input", () => { randomRemaining = survivorsAt(Number($("elapsedSlider").value)); updateHalfLifeReadouts(); });
+  $("elapsedSlider").addEventListener("input", () => { elapsed = Number($("elapsedSlider").value); updateHalfLifeReadouts(); dirty = true; });
   $("sampleSlider").addEventListener("input", rerollSample);
   $("halfLifeValue").addEventListener("input", updateHalfLifeReadouts);
   $("halfLifeUnit").addEventListener("change", updateHalfLifeReadouts);
   $("clockReroll").addEventListener("click", rerollSample);
-  $("clockPlay").addEventListener("click", () => {
-    clockPlaying = !clockPlaying;
+  $("clockRate").addEventListener("input", () => { $("clockRateValue").textContent = `${Number($("clockRate").value).toFixed(2)} T½/s`; });
+  function setClockPlaying(value) {
+    clockPlaying = value;
     const button = $("clockPlay");
-    button.setAttribute("aria-pressed", String(clockPlaying));
-    button.setAttribute("aria-label", `${clockPlaying ? "Pause" : "Play"} half-life decay animation`);
-    button.innerHTML = `${clockPlaying ? "Ⅱ" : "▶"} <span>${clockPlaying ? "Pause" : "Play"}</span>`;
+    button.setAttribute("aria-pressed", String(value));
+    button.setAttribute("aria-label", `${value ? "Pause" : "Play"} half-life decay animation`);
+    button.innerHTML = `${value ? "Ⅱ" : "▶"} <span>${value ? "Pause" : "Play"}</span>`;
+  }
+  $("clockPlay").addEventListener("click", () => {
+    if (!canEmit()) return;
+    if (elapsed >= 6) { elapsed = 0; $("elapsedSlider").value = "0"; updateHalfLifeReadouts(); }
+    setClockPlaying(!clockPlaying); dirty = true;
   });
-
-  window.addEventListener("resize", () => { lastDecaySize = ""; lastClockSize = ""; lastCloudSize = ""; renderNuclideMap(); drawHalfLifeChart(Number($("expectedRemaining").textContent.replaceAll(",", "")) || 0, randomRemaining, Number($("sampleSlider").value), Number($("elapsedSlider").value)); drawDecayCloud(); });
+  bindOrbit(decayCanvas, eventCamera, "eventViewReset");
+  bindOrbit(decayCloudCanvas, cloudCamera, "cloudViewReset");
+  new ResizeObserver(() => { dirty = true; updateHalfLifeReadouts(); drawBetaSpectrum(); }).observe($("decay-title").parentElement);
+  window.addEventListener("resize", () => { dirty = true; updateHalfLifeReadouts(); drawBetaSpectrum(); });
+  new MutationObserver(() => { dirty = true; renderNuclideMap(); updateHalfLifeReadouts(); drawBetaSpectrum(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   populatePresets(false);
   setMode("alpha", false);
   rerollSample();
-  drawDecayCanvas();
-
   function animateDecay(now) {
-    const dt = Math.min(.05, Math.max(0, (now - eventLast) / 1000));
+    const dt = document.hidden ? 0 : Math.min(.05, Math.max(0, (now - eventLast) / 1000));
     eventLast = now;
+    if (document.hidden) { requestAnimationFrame(animateDecay); return; }
     if (clockPlaying) {
-      const next = Number($("elapsedSlider").value) + dt * .45;
-      if (next >= 6) {
-        $("elapsedSlider").value = "0";
-        rerollSample();
-      } else {
-        $("elapsedSlider").value = next.toFixed(2);
-        randomRemaining = survivorsAt(Number($("elapsedSlider").value));
-        updateHalfLifeReadouts();
-      }
+      elapsed = Math.min(6, elapsed + dt * Number($("clockRate").value));
+      $("elapsedSlider").value = String(elapsed);
+      if (now - lastReadoutTime >= 100 || elapsed >= 6) { updateHalfLifeReadouts(); lastReadoutTime = now; }
+      if (elapsed >= 6) setClockPlaying(false);
+      dirty = true;
     }
     if (eventRunning) {
-      eventProgress = Math.min(1, eventProgress + dt * Number($("decaySpeed").value) / 1.8);
+      eventProgress = Math.min(1, eventProgress + dt * Number($("decaySpeed").value) / 2.7);
       if (eventProgress >= 1) finishEvent();
+      dirty = true;
     }
-    drawDecayCanvas(now);
+    if ($("eventRotate").checked) { eventCamera.yaw += dt * .24; dirty = true; }
+    if ($("cloudRotate").checked) { cloudCamera.yaw += dt * .2; dirty = true; }
+    if (dirty) { drawDecayCanvas(); drawDecayCloud(); dirty = false; }
     currentFrame = requestAnimationFrame(animateDecay);
   }
   eventLast = performance.now(); currentFrame = requestAnimationFrame(animateDecay);
